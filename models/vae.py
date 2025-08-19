@@ -121,7 +121,7 @@ class ExpressionRegressor(nn.Module):
             layers.extend([
                 nn.Linear(input_dim, hidden_dim),
                 nn.ReLU(),
-                nn.BatchNorm1d(hidden_dim),
+                nn.LayerNorm(hidden_dim),
                 nn.Dropout(0.3)
             ])
             input_dim = hidden_dim

@@ -130,9 +130,10 @@ def create_dataloaders(config):
     
     # 创建DataLoader
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=config.BATCH_SIZE, 
+        train_dataset,
+        batch_size=max(2, config.BATCH_SIZE),  # 确保 >=2
         shuffle=True,
+        drop_last=True,                        # 避免最后一个 batch=1
         num_workers=config.NUM_WORKERS,
         pin_memory=config.PIN_MEMORY
     )
