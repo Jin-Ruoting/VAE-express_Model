@@ -58,7 +58,7 @@ class RoadmapVAEConfig:
     
     # === 损失函数权重 ===
     RECON_WEIGHT = 1.0      # 重建损失权重
-    KL_WEIGHT = 0.0001      # KL散度权重 (防止后验坍塌)
+    KL_WEIGHT = 1e-5      # KL散度权重 (防止后验坍塌)
     EXPR_WEIGHT = 15.0      # 表达预测损失权重
     
     # KL权重退火
