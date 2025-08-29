@@ -58,7 +58,9 @@ def main():
         val_loader=val_loader,
         num_epochs=config.NUM_EPOCHS,
         save_path=save_path,
-        patience=config.PATIENCE
+        patience=config.PATIENCE,
+        kl_beta_max=config.KL_WEIGHT,
+        kl_warmup_epochs=config.KL_ANNEAL_EPOCHS
     )
     
     print("Training completed!")

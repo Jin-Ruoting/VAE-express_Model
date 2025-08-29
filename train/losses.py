@@ -23,16 +23,27 @@ def expression_prediction_loss(pred_expr, true_expr):
     """
     return F.mse_loss(pred_expr.squeeze(), true_expr.squeeze())
 
-def total_vae_loss(x_hat, x, mu, logvar, pred_expr, true_expr,
-                   recon_weight=1.0, kl_weight=0.01, expr_weight=10.0):
+def total_vae_loss(x_hat, x, mu, logvar, pred_expr, y,
+                   recon_weight=None, kl_weight=None, expr_weight=None):
     """
-    三项联合损失函数
+    支持在训练时传入动态的权重（不传则使用模块内默认值）
     """
-    recon = mse_reconstruction_loss(x_hat, x)
+    recon_loss = mse_reconstruction_loss(x_hat, x)
     kl = kl_divergence_loss(mu, logvar)
-    expr = expression_prediction_loss(pred_expr, true_expr)
+    expr_loss = expression_prediction_loss(pred_expr, y)
 
-    total = recon_weight * recon + kl_weight * kl + expr_weight * expr
-    return total, {'recon_loss': recon.item(),
-                   'kl_loss': kl.item(),
-                   'expr_loss': expr.item()}
+    # 读取默认权重
+    default_recon_w = 1.0
+    default_kl_w    = 1e-5  # 与配置保持一致
+    default_expr_w  = 15.0
+
+    rw = default_recon_w if recon_weight is None else recon_weight
+    kw = default_kl_w    if kl_weight    is None else kl_weight
+    ew = default_expr_w  if expr_weight  is None else expr_weight
+
+    total = rw * recon_loss + kw * kl + ew * expr_loss
+    return total, {
+        'recon_loss': float(rw * recon_loss),
+        'kl_loss':    float(kw * kl),
+        'expr_loss':  float(ew * expr_loss)
+    }

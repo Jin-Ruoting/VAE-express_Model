@@ -13,7 +13,7 @@ class VAETrainer:
         self.loss_fn = loss_fn
         self.device = device
 
-    def train_epoch(self, dataloader):
+    def train_epoch(self, dataloader, kl_beta=None):
         self.model.train()
         total_loss = 0
         total_recon_loss = 0
@@ -30,7 +30,8 @@ class VAETrainer:
             self.optimizer.zero_grad()
             x_hat, pred_expr, mu, logvar = self.model(x)
 
-            loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y)
+            loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y,
+                                           kl_weight=kl_beta)
             loss.backward()
             
             # 梯度裁剪
@@ -68,7 +69,7 @@ class VAETrainer:
         
         return avg_loss, pearson_r, avg_recon, avg_kl, avg_expr
 
-    def validate(self, dataloader):
+    def validate(self, dataloader, kl_beta=None):
         self.model.eval()
         total_loss = 0
         total_recon_loss = 0
@@ -83,7 +84,8 @@ class VAETrainer:
                 y = y.to(self.device)
 
                 x_hat, pred_expr, mu, logvar = self.model(x)
-                loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y)
+                loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y,
+                                               kl_weight=kl_beta)
 
                 total_loss += loss.item()
                 total_recon_loss += loss_dict['recon_loss']
@@ -108,29 +110,25 @@ class VAETrainer:
         
         return avg_loss, pearson_r, avg_recon, avg_kl, avg_expr
 
-    def fit(self, train_loader, val_loader, num_epochs=50, save_path="best_model.pt", patience=5):
+    def fit(self, train_loader, val_loader, num_epochs=50, save_path="best_model.pt",
+            patience=5, kl_beta_max=1e-5, kl_warmup_epochs=50):
         best_val_loss = float('inf')
         patience_counter = 0
-        
-        # 学习率调度器
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', factor=0.5, patience=3, verbose=True
         )
 
-        print("Starting training...")
         for epoch in range(num_epochs):
-            print(f"\nEpoch {epoch+1}/{num_epochs}")
-            print("-" * 50)
-            
-            # 训练
-            train_loss, train_r, train_recon, train_kl, train_expr = self.train_epoch(train_loader)
-            
-            # 验证
-            val_loss, val_r, val_recon, val_kl, val_expr = self.validate(val_loader)
-            
-            # 学习率调度
+            # 线性退火：从0逐步升到 kl_beta_max
+            warmup_ratio = min(1.0, (epoch + 1) / max(1, kl_warmup_epochs))
+            kl_beta = kl_beta_max * warmup_ratio
+
+            # 训练/验证时传入当期 kl_beta
+            train_loss, train_r, train_recon, train_kl, train_expr = self.train_epoch(train_loader, kl_beta=kl_beta)
+            val_loss, val_r, val_recon, val_kl, val_expr = self.validate(val_loader, kl_beta=kl_beta)
+
             scheduler.step(val_loss)
-            
+            print(f"(epoch {epoch+1}) KL beta: {kl_beta:.6g}")
             # 打印结果
             print(f"Train - Loss: {train_loss:.4f}, R: {train_r:.3f}, "
                   f"Recon: {train_recon:.4f}, KL: {train_kl:.6f}, Expr: {train_expr:.4f}")
