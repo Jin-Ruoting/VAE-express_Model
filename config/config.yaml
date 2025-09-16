@@ -19,4 +19,4 @@ paths:
   promoters_bed: preprocessing/annotations/promoters_2kb.hg38.bed
   enhancer_map: #annotations/gene_enhancer_map_ABC.tsv   # 可为空，Promoter-only时不使用
   stats_json: preprocessing/annotations/signal_stats.json             # 信号分位数/缩放统计
-  expression: exp/raw_exp.cleaned.tsv
+  expression: exp/raw_exp.final.tsv
