@@ -1,79 +1,71 @@
-import re, argparse, yaml
+import re, argparse, yaml, io
 import pandas as pd
 from pathlib import Path
 
-ENSEMBL_PAT = re.compile(r'ENSG\d+(?:\.\d+)?')
+ENSEMBL_PAT = re.compile(r'^ENSG\d+(?:\.\d+)?$')
 
 def strip_version(s: pd.Series) -> pd.Series:
     return s.astype(str).str.replace(r'\.\d+$', '', regex=True)
 
-def clean_colnames(cols):
-    return [str(c).replace('\ufeff','').strip() for c in cols]
-
-def ensembl_match_rate(s: pd.Series, n=500) -> float:
-    sample = s.dropna().astype(str).str.strip().head(n)
-    if sample.empty: return 0.0
-    return float((sample.map(lambda x: bool(re.fullmatch(r'ENSG\d+(?:\.\d+)?', x))).mean()))
-
-def extract_ensembl(s: pd.Series) -> pd.Series:
-    # 在任意字符串中提取第一个 ENSG… 子串
-    return s.astype(str).str.extract(r'(ENSG\d+(?:\.\d+)?)', expand=True)[0]
-
-def find_gene_id_column(df: pd.DataFrame) -> str:
-    # 优先 gene_id 列
-    if 'gene_id' in df.columns: return 'gene_id'
-    for cand in ['gene', 'Gene', 'gene_symbol', 'GeneSymbol', 'symbol', 'Symbol']:
-        if cand in df.columns:
-            return cand
-    return df.columns[0]
+def read_with_fixed_header(path: str):
+    # 把“被换行的表头”拼回一行；遇到第一个以 ENSG 开头的行视为数据开始
+    header_tokens = []
+    data_lines = []
+    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line:
+                continue
+            first_token = line.split()[0]
+            if ENSEMBL_PAT.match(first_token):  # 第一行数据
+                data_lines.append(line)
+                break
+            # 累加表头 token（按任意空白切分）
+            header_tokens.extend(line.split())
+        # 其余数据行
+        for line in f:
+            if line.strip():
+                data_lines.append(line.rstrip('\n'))
+    if not header_tokens:
+        raise RuntimeError('无法解析表头：文件开头未找到列名。')
+    cols = header_tokens
+    # 以“任意空白分隔”解析（原文件常为tab，也兼容空格）
+    buf = io.StringIO('\n'.join(data_lines))
+    df = pd.read_csv(buf, sep=r'\s+', engine='python', header=None, names=cols, dtype=str)
+    # 去空白
+    df.columns = [c.strip().replace('\ufeff','') for c in df.columns]
+    for c in df.columns:
+        df[c] = df[c].astype(str).str.strip()
+    return df
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--raw', required=True, help='Roadmap 57epi 解压后的 TSV')
+    ap.add_argument('--raw', required=True, help='Roadmap 57epi 解压后的 TSV（可能表头断行）')
     ap.add_argument('--config', required=True, help='config/config.yaml（读取 eids）')
     ap.add_argument('--promoters', required=True, help='promoters_2kb.hg38.bed')
-    ap.add_argument('--keep_zero', action='store_true', help='不删全零基因（调试建议先开）')
+    ap.add_argument('--keep_zero', action='store_true', help='不删全零基因')
     ap.add_argument('--out', default='exp/raw_exp.final.tsv')
     args = ap.parse_args()
 
-    # 1) 读取（以字符串读取，避免数值化破坏内容）
-    df = pd.read_csv(args.raw, sep='\t', dtype=str, engine='python')
-    df.columns = clean_colnames(df.columns)
-    df = df.apply(lambda col: col.str.strip() if col.dtype == object else col)
-    print(f'[INFO] Raw shape: {df.shape}')
-    print(f'[INFO] Columns head: {df.columns[:10].tolist()}')
+    # 1) 读取并修复表头
+    df = read_with_fixed_header(args.raw)
+    print(f'[INFO] Raw(fixed) shape: {df.shape}')
+    print(f'[INFO] Columns head: {df.columns[:12].tolist()}')
 
-    # 2) 定位 gene_id 列并标准化
-    gene_col = find_gene_id_column(df)
-    df.rename(columns={gene_col: 'gene_id'}, inplace=True)
+    # 2) gene_id 归一化（抽取 ENSG，去版本）
+    if 'gene_id' not in df.columns:
+        raise RuntimeError('修复后的表头中没有 gene_id 列，请检查源文件。')
+    df['gene_id'] = df['gene_id'].str.extract(r'(ENSG\d+(?:\.\d+)?)', expand=True)[0]
+    if df['gene_id'].isna().all():
+        raise RuntimeError('gene_id 列未能抽取到任何 ENSG*，请检查源文件。')
+    df['gene_id'] = strip_version(df['gene_id'])
 
-    # 2.1 从 gene_id 列中“提取”真正的 Ensembl ID
-    extr = extract_ensembl(df['gene_id'])
-    extr_rate = extr.notna().mean()
-    print(f'[INFO] Extractable Ensembl rate in gene_id column: {extr_rate:.3f}')
-    if extr_rate > 0.5:
-        df['gene_id'] = strip_version(extr)
-        print('[INFO] gene_id extracted and version stripped.')
-    else:
-        # 如果提取率很低，再尝试在所有列中寻找含 ENSG 的列
-        for c in df.columns:
-            if c == 'gene_id': continue
-            tmp = extract_ensembl(df[c])
-            rate = tmp.notna().mean()
-            if rate > 0.8:
-                print(f'[INFO] Found Ensembl IDs in column {c} (rate={rate:.3f}), using it as gene_id.')
-                df['gene_id'] = strip_version(tmp)
-                break
-
-    # 再测一次匹配率
-    print(f'[INFO] Ensembl match rate(final): {ensembl_match_rate(df["gene_id"]):.3f}')
-
-    # 3) 其余列转为数值（EID/数值列）
+    # 3) 其它列转为数值
     value_cols = [c for c in df.columns if c != 'gene_id']
     for c in value_cols:
         df[c] = pd.to_numeric(df[c], errors='coerce')
 
-    # 4) 去重（均值聚合）
+    # 4) 按 gene_id 去重聚合
     df = df.groupby('gene_id', as_index=False).mean(numeric_only=True)
     print(f'[INFO] After groupby(unique gene_id): {df.shape}')
 
@@ -83,21 +75,21 @@ def main():
     present = [e for e in eids if e in df.columns]
     missing = [e for e in eids if e not in df.columns]
     if not present:
-        raise RuntimeError(f'表达矩阵中未找到任何配置的EID列。missing={missing[:10]}')
+        raise RuntimeError(f'表达矩阵中未找到任何配置的EID列。missing(前10)={missing[:10]}')
     if missing:
         print(f'[WARN] 缺失 EID 列（忽略）: {missing}')
     df = df[['gene_id'] + present]
     print(f'[INFO] After EID subset: {df.shape}')
 
-    # 6) 与 promoters 交集（对双方做提取+去版本号）
+    # 6) 与 promoters 交集（去版本）
     prom = pd.read_csv(args.promoters, sep='\t', header=None,
                        names=['chrom','start','end','gene_id','score','strand'], dtype={'gene_id': str})
-    prom_ids = strip_version(extract_ensembl(prom['gene_id']).astype(str)).dropna().unique()
+    prom_ids = strip_version(prom['gene_id'].astype(str).str.strip()).unique()
     before_inter = df.shape[0]
     df = df[df['gene_id'].isin(set(prom_ids))]
     print(f'[INFO] Intersect with promoters: {df.shape[0]}/{before_inter}')
 
-    # 7) 删全零
+    # 7) 删全零（可选）
     if not args.keep_zero:
         vals = df.iloc[:, 1:]
         zero_only = (vals.sum(axis=1) == 0)
