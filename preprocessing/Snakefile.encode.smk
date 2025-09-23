@@ -26,7 +26,8 @@ rule pick_url:
         if [ -z "{params.biosample}" ]; then
           echo '{{"found":false,"reason":"no biosample mapping"}}' > {output}
         else
-          python scripts/encode_pick.py --biosample "{params.biosample}" --mark "{wildcards.mark}" > {output}
+          python scripts/encode_pick.py --biosample "{params.biosample}" --mark "{wildcards.mark}" > {output} || \
+          echo '{{"found":false,"reason":"query error"}}' > {output}
         fi
         """
 
@@ -36,8 +37,10 @@ rule download_bw:
     run:
         meta=json.load(open(input[0]))
         if not meta.get("found", False):
-            raise ValueError(f"No ENCODE bigWig for {wildcards.eid}-{wildcards.mark}. Check mapping or mark.")
-        url=meta["url"]
-        tmp=f"{output[0]}.part"
-        shell(f'curl -L --retry 5 --retry-delay 5 -o "{tmp}" "{url}"')
-        shell(f'mv "{tmp}" "{output[0]}"')
+            print(f"[WARN] Skip {wildcards.eid}-{wildcards.mark}: not found")
+            shell(f': > "{output[0]}"')
+        else:
+            url=meta["url"]
+            tmp=f"{output[0]}.part"
+            shell(f'curl -L --retry 5 --retry-delay 5 -o "{tmp}" "{url}"')
+            shell(f'mv "{tmp}" "{output[0]}"')
