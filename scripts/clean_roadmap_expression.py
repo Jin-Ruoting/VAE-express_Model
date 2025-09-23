@@ -16,31 +16,27 @@ def read_with_fixed_header(path: str):
             line = line.rstrip('\n')
             if not line:
                 continue
-            first_token = line.split()[0]
-            if ENSEMBL_PAT.match(first_token):  # 第一行数据
+            first = line.split()[0] if line.split() else ''
+            if ENSEMBL_PAT.match(first):  # 第一行数据
                 data_lines.append(line)
                 break
-            # 累加表头 token（按任意空白切分）
-            header_tokens.extend(line.split())
-        # 其余数据行
+            header_tokens.extend(line.split())  # 任意空白切分累积表头
         for line in f:
             if line.strip():
                 data_lines.append(line.rstrip('\n'))
     if not header_tokens:
         raise RuntimeError('无法解析表头：文件开头未找到列名。')
-    cols = header_tokens
-    # 以“任意空白分隔”解析（原文件常为tab，也兼容空格）
+    cols = [c.strip().replace('\ufeff','') for c in header_tokens]
     buf = io.StringIO('\n'.join(data_lines))
+    # 任意空白分隔，兼容tab/空格混排
     df = pd.read_csv(buf, sep=r'\s+', engine='python', header=None, names=cols, dtype=str)
-    # 去空白
-    df.columns = [c.strip().replace('\ufeff','') for c in df.columns]
     for c in df.columns:
-        df[c] = df[c].astype(str).str.strip()
+        df[c] = df[c].astype(str).strip()
     return df
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--raw', required=True, help='Roadmap 57epi 解压后的 TSV（可能表头断行）')
+    ap.add_argument('--raw', required=True, help='原始表达TSV（允许表头断行）')
     ap.add_argument('--config', required=True, help='config/config.yaml（读取 eids）')
     ap.add_argument('--promoters', required=True, help='promoters_2kb.hg38.bed')
     ap.add_argument('--keep_zero', action='store_true', help='不删全零基因')
@@ -50,14 +46,15 @@ def main():
     # 1) 读取并修复表头
     df = read_with_fixed_header(args.raw)
     print(f'[INFO] Raw(fixed) shape: {df.shape}')
-    print(f'[INFO] Columns head: {df.columns[:12].tolist()}')
 
     # 2) gene_id 归一化（抽取 ENSG，去版本）
     if 'gene_id' not in df.columns:
-        raise RuntimeError('修复后的表头中没有 gene_id 列，请检查源文件。')
+        raise RuntimeError('修复后的表头无 gene_id 列。')
+
+    # 抽取 ENSG 并去版本号
     df['gene_id'] = df['gene_id'].str.extract(r'(ENSG\d+(?:\.\d+)?)', expand=True)[0]
     if df['gene_id'].isna().all():
-        raise RuntimeError('gene_id 列未能抽取到任何 ENSG*，请检查源文件。')
+        raise RuntimeError('gene_id 列未能抽取出 ENSG*。')
     df['gene_id'] = strip_version(df['gene_id'])
 
     # 3) 其它列转为数值
@@ -75,7 +72,7 @@ def main():
     present = [e for e in eids if e in df.columns]
     missing = [e for e in eids if e not in df.columns]
     if not present:
-        raise RuntimeError(f'表达矩阵中未找到任何配置的EID列。missing(前10)={missing[:10]}')
+        raise RuntimeError(f'表达矩阵中未找到任何配置的EID列，missing(前10)={missing[:10]}')
     if missing:
         print(f'[WARN] 缺失 EID 列（忽略）: {missing}')
     df = df[['gene_id'] + present]
@@ -85,9 +82,9 @@ def main():
     prom = pd.read_csv(args.promoters, sep='\t', header=None,
                        names=['chrom','start','end','gene_id','score','strand'], dtype={'gene_id': str})
     prom_ids = strip_version(prom['gene_id'].astype(str).str.strip()).unique()
-    before_inter = df.shape[0]
+    before = df.shape[0]
     df = df[df['gene_id'].isin(set(prom_ids))]
-    print(f'[INFO] Intersect with promoters: {df.shape[0]}/{before_inter}')
+    print(f'[INFO] Intersect with promoters: {df.shape[0]}/{before}')
 
     # 7) 删全零（可选）
     if not args.keep_zero:
@@ -99,7 +96,7 @@ def main():
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(args.out, sep='\t', index=False)
-    print(f'[OK] Saved cleaned expression to {args.out} | genes={df.shape[0]} eids={df.shape[1]-1}')
+    print(f'[OK] Saved -> {args.out} | genes={df.shape[0]} eids={df.shape[1]-1}')
 
 if __name__ == '__main__':
     main()
