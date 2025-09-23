@@ -14,26 +14,43 @@ MARK2Q = {
 
 OUTPUT_TYPES = ["signal p-value", "fold change over control", "signal"]
 
-def enc_query(params):
+HEADERS = {
+    "accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (encode-script)"
+}
+
+def enc_get(params):
     base = "https://www.encodeproject.org/search/"
-    params.setdefault("type", "File")
-    params.setdefault("file_format", "bigWig")
-    params.setdefault("assembly", "GRCh38")
-    params.setdefault("status", "released")
-    params.setdefault("format", "json")
-    params.setdefault("limit", "all")
-    params["field"] = ["accession","href","target.label","biosample_ontology.term_name",
-                       "assembly","output_type","assay_title","preferred_default"]
+    # 基础参数
+    base_params = {
+        "type": "File",
+        "file_format": "bigWig",
+        "assembly": "GRCh38",
+        "status": "released",
+        "format": "json",
+        "limit": "all",
+    }
+    field_list = ["accession","href","target.label","biosample_ontology.term_name",
+                  "assembly","output_type","assay_title","preferred_default"]
     q=[]
-    for k,v in params.items():
+    for k,v in {**base_params, **params}.items():
         if isinstance(v, list):
             for vi in v: q.append((k,vi))
         else:
             q.append((k,v))
+    # 重复 field 参数
+    for f in field_list:
+        q.append(("field", f))
     url = base + "?" + urllib.parse.urlencode(q)
-    r = requests.get(url, headers={"accept":"application/json"})
-    r.raise_for_status()
-    return r.json().get("@graph", [])
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    # 有些组合返回 404，这里不抛异常，交由上层降级处理
+    if r.status_code != 200:
+        return r.status_code, []
+    try:
+        data = r.json()
+    except Exception:
+        return r.status_code, []
+    return r.status_code, data.get("@graph", [])
 
 def pick_best(files):
     pref=[f for f in files if f.get("preferred_default") is True]
@@ -51,20 +68,31 @@ if __name__ == "__main__":
     assay, target = MARK2Q[args.mark]
     found = None
     used_output = None
+
+    # 1) 严格查询（term_name 精确匹配）
     for ot in OUTPUT_TYPES:
-        params = {
+        strict = {
             "assay_title": assay,
-            "biosample_ontology.term_name": args.biosample,
-            "assembly": "GRCh38",
             "output_type": ot,
+            "biosample_ontology.term_name": args.biosample,
         }
-        if target:
-            params["target.label"] = target
-        files = enc_query(params)
+        if target: strict["target.label"] = target
+        code, files = enc_get(strict)
         best = pick_best(files)
         if best:
-            found = best
-            used_output = ot
+            found, used_output = best, ot
+            break
+        # 2) 降级查询：改用 searchTerm 模糊匹配 biosample
+        relaxed = {
+            "assay_title": assay,
+            "output_type": ot,
+            "searchTerm": args.biosample,
+        }
+        if target: relaxed["target.label"] = target
+        code2, files2 = enc_get(relaxed)
+        best2 = pick_best(files2)
+        if best2:
+            found, used_output = best2, ot
             break
 
     if not found:
