@@ -8,10 +8,16 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import torch
+import yaml
 from data.roadmap_dataset import create_dataloaders
 from models.vae import VAE
 from train.trainer import VAETrainer
 from train.losses import total_vae_loss
+
+# 合理使用CPU：限制BLAS线程，避免和DataLoader互相抢
+torch.set_num_threads(int(os.getenv("OMP_NUM_THREADS", "8")))
+torch.set_num_interop_threads(1)
+torch.backends.cudnn.benchmark = True
 
 def ensure_dirs():
     Path('results/models').mkdir(parents=True, exist_ok=True)
@@ -23,8 +29,11 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
 
-    # 使用我们新Dataset封装
+    # 使用Dataset封装
     train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')
+    cfg = yaml.safe_load(open('config/config.yaml'))
+    marks = list(cfg['marks']['core']) + (cfg['marks'].get('extra',[]) if cfg.get('use_extra') else [])
+    in_channels = len(marks)  # 应为7
 
     # 根据Dataset通道与长度更新模型输入
     sample_X, _ = next(iter(train_loader))
@@ -33,6 +42,15 @@ def main():
 
     model = VAE(input_channels=C, latent_dim=64, sequence_length=L).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-4)
+
+    # 多卡与设备放置
+    if device == 'cuda':
+        if torch.cuda.device_count() > 1:
+            print(f"Using DataParallel over {torch.cuda.device_count()} GPUs")
+            model = torch.nn.DataParallel(model)
+        model = model.to('cuda')
+    else:
+        model = model.to('cpu')
 
     trainer = VAETrainer(model=model, optimizer=optim, loss_fn=total_vae_loss, device=device)
 

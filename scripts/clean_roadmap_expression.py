@@ -27,11 +27,11 @@ def read_with_fixed_header(path: str):
     if not header_tokens:
         raise RuntimeError('无法解析表头：文件开头未找到列名。')
     cols = [c.strip().replace('\ufeff','') for c in header_tokens]
+    cols = [("gene_id" if i==0 and c=="" else c) for i,c in enumerate(cols)]
     buf = io.StringIO('\n'.join(data_lines))
-    # 任意空白分隔，兼容tab/空格混排
     df = pd.read_csv(buf, sep=r'\s+', engine='python', header=None, names=cols, dtype=str)
     for c in df.columns:
-        df[c] = df[c].astype(str).strip()
+        df[c] = df[c].astype(str).str.replace('\ufeff', '', regex=False).str.strip()
     return df
 
 def main():
