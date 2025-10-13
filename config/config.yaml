@@ -9,9 +9,9 @@ marks:
   core: [H3K4me3, H3K27ac, H3K4me1, H3K36me3, H3K27me3, H3K9me3, H3K9ac]
   extra: [ATAC, POLR2A]   # 可按可用性开启
 # 实际使用通道 = marks.core + marks.extra
-use_extra: true
+use_extra: false
 
-eids: [E003, E004, E005, E006, E007, E016, E066, E087, E114, E116, E118]
+eids: [E003, E004, E005, E006, E007, E016, E066, E114, E116, E118]
 
 paths:
   genome_sizes: preprocessing/annotations/hg38.fa.sizes
