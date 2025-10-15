@@ -11,26 +11,26 @@ def main():
 
     stats = json.load(open(stats_path))
     keys = list(stats.keys())
-    print(f"[INFO] loaded {len(keys)} stats keys; example: {keys[:5]}")
+    print(f"[INFO] loaded {len(keys)} top-level keys; example: {keys[:5]}")
 
     out = {}
-    # 情况1：已经是 EID:MARK
+
+    # 形态A：已经是 EID:MARK
     if any(':' in k for k in keys):
-        print("[INFO] Detected 'EID:MARK' keys; no change needed.")
-        # 仍补齐缺失键（如有）
+        print("[INFO] Detected 'EID:MARK' keys; normalizing and filling missing if possible.")
         for e in eids:
             for m in marks:
                 k = f"{e}:{m}"
                 if k in stats:
                     out[k] = stats[k]
-                elif m in stats:  # 如果有全局mark，复制一份
+                elif m in stats:
                     out[k] = stats[m]
-                elif f"{e}-{m}" in stats:  # 兼容
+                elif f"{e}-{m}" in stats:
                     out[k] = stats[f"{e}-{m}"]
                 else:
-                    print(f"[WARN] missing stat for {k}, will skip")
-        # 保留原有其他键
-    # 情况2：键为 EID-MARK（连字符）
+                    print(f"[WARN] missing stat for {k}")
+
+    # 形态B：EID-MARK（连字符）
     elif any('-' in k for k in keys):
         print("[INFO] Detected 'EID-MARK' keys; converting to 'EID:MARK'.")
         for e in eids:
@@ -42,8 +42,22 @@ def main():
                 elif m in stats:
                     out[k_col] = stats[m]
                 else:
-                    print(f"[WARN] missing stat for {k_dash}, will skip")
-    # 情况3：只有按 mark（全局）统计
+                    print(f"[WARN] missing stat for {k_dash}")
+
+    # 形态C：顶层为 EID，value 是以 mark 为键的子字典（当前情况）
+    elif all(isinstance(stats[k], dict) for k in keys) and set(marks) & set(stats[keys[0]].keys()):
+        print("[INFO] Detected nested dict 'EID -> MARK -> {q1,q99}'; flattening.")
+        for e in eids:
+            sub = stats.get(e, {})
+            if not isinstance(sub, dict):
+                print(f"[WARN] {e} is not a dict, skip"); continue
+            for m in marks:
+                if m in sub:
+                    out[f"{e}:{m}"] = sub[m]
+                else:
+                    print(f"[WARN] missing stat for {e}:{m}")
+
+    # 形态D：仅有全局 mark 层
     elif set(keys) >= set(marks):
         print("[INFO] Detected mark-level stats; expanding to each EID:MARK.")
         for e in eids:
@@ -52,6 +66,7 @@ def main():
                     out[f"{e}:{m}"] = stats[m]
                 else:
                     print(f"[WARN] missing global stat for {m}")
+
     else:
         print("[ERR] Unrecognized stats format. Keys example:", keys[:10])
         sys.exit(2)

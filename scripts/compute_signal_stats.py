@@ -22,9 +22,8 @@ def load_sizes(path):
 def main():
     args = parse_args()
     chrom_sizes = load_sizes(args.genome_sizes)
-    stats = {}
+    all_stats = {}  # 改为扁平字典
     for eid in args.eids:
-        stats[eid] = {}
         for mark in args.marks:
             bw_path = Path(args.bw_dir) / f"{eid}-{mark}.bw"
             if not bw_path.exists():
@@ -48,11 +47,13 @@ def main():
             q1, q99 = np.quantile(vals, [0.01, 0.99])
             if q99 <= q1:
                 q1, q99 = float(np.min(vals)), float(np.max(vals)+1e-6)
-            stats[eid][mark] = {'q1': float(q1), 'q99': float(q99)}
+            s = {'q1': float(q1), 'q99': float(q99)}
+            all_stats[f"{eid}:{mark}"] = s
+
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
-    with open(args.out, 'w') as f:
-        json.dump(stats, f, indent=2)
-    print(f"Saved stats to {args.out}")
+    with open(args.out, "w") as f:
+        json.dump(all_stats, f)
+    print(f"[OK] saved {len(all_stats)} entries to {args.out}")
 
 if __name__ == '__main__':
     main()
