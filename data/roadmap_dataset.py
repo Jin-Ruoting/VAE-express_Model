@@ -78,6 +78,40 @@ class RoadmapDataset(Dataset):
                 raise ValueError(f"enhancer_map缺少列: {missing}")
             self.enhancers = enh
 
+        # 载入缩放统计（支持扁平与嵌套，最终存为 EID:MARK）
+        self.stats = {}
+        if stats_json and Path(stats_json).exists():
+            try:
+                raw = json.load(open(stats_json))
+                keys = list(raw.keys())
+                flat = {}
+                if any(isinstance(k, str) and ':' in k for k in keys):
+                    # 已是扁平
+                    flat = raw
+                elif all(isinstance(raw[k], dict) for k in keys):
+                    # 形如 EID -> {MARK: {q1,q99}}
+                    for e in eids:
+                        sub = raw.get(e, {})
+                        if isinstance(sub, dict):
+                            for m in (list(marks_core) + (list(marks_extra) if use_extra and marks_extra else [])):
+                                if m in sub:
+                                    flat[f"{e}:{m}"] = sub[m]
+                else:
+                    # 其他形态（如只有 MARK 级别），复制到每个 EID
+                    mark_keys = set(list(marks_core) + (list(marks_extra) if use_extra and marks_extra else []))
+                    if mark_keys.issubset(set(keys)):
+                        for e in eids:
+                            for m in mark_keys:
+                                flat[f"{e}:{m}"] = raw[m]
+                self.stats = flat
+            except Exception as ex:
+                logger.warning(f"Failed to load/parse stats_json {stats_json}: {ex}; using empty stats.")
+                self.stats = {}
+        # 调试信息
+        if os.getenv('DATASET_DEBUG','0') == '1':
+            colon = sum(1 for k in self.stats if isinstance(k,str) and ':' in k)
+            print(f"[DATASET] stats_path={stats_json} keys={len(self.stats)} colon_keys={colon}")
+
         # 载入染色体长度（用于裁剪窗口）
         self.chrom_sizes = {}
         with open(genome_sizes) as f:
@@ -298,8 +332,11 @@ def create_dataloaders(config):
     g = torch.Generator().manual_seed(42)
     train_set, val_set, test_set = torch.utils.data.random_split(ds, [n_train, n_val, n_test], generator=g)
 
+    num_workers = int(os.getenv('NUM_WORKERS', '0'))
+    pin_mem = torch.cuda.is_available()
+
     def make_loader(d, shuffle, drop_last):
         return DataLoader(d, batch_size=16, shuffle=shuffle, drop_last=drop_last,
-                          num_workers=4, pin_memory=True)
+                          num_workers=num_workers, pin_memory=pin_mem)
 
     return make_loader(train_set, True, True), make_loader(val_set, False, False), make_loader(test_set, False, False)
