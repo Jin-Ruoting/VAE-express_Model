@@ -1,33 +1,23 @@
-import os, json, math
+import os, json
 import numpy as np
-import pandas as pd
-import torch
+import pyBigWig
+
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
-import pyBigWig
+import pandas as pd
+import torch
 
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class RoadmapDataset(Dataset):
-    def __init__(self,
-                 data_dir,
-                 promoters_bed,
-                 expression_tsv,
-                 genome_sizes,
-                 eids,
-                 marks_core,
-                 marks_extra=None,
-                 use_extra=True,
-                 promoter_bp=2000,
-                 use_enhancers=False,
-                 enhancer_map_tsv=None,
-                 enhancer_bp=1000,
-                 top_k=5,
-                 stats_json=None,
-                 min_expr_threshold=0.0,
-                 zscore_per_eid=False):
+    def __init__(self, 
+                 data_dir, promoters_bed, expression_tsv, genome_sizes,
+                 eids, marks_core, marks_extra=None, use_extra=True,
+                 promoter_bp=2000, use_enhancers=False, enhancer_map_tsv=None,
+                 enhancer_bp=1000, top_k=5, stats_json=None,
+                 min_expr_threshold=0.0, zscore_per_eid=False):
         """
         在线从 bigWig 切片，返回 X: [C, L], y: 标量(log1p或zscore后)
         """
@@ -88,22 +78,25 @@ class RoadmapDataset(Dataset):
                 raise ValueError(f"enhancer_map缺少列: {missing}")
             self.enhancers = enh
 
-        # bigWig 句柄
-        self.bw = {}
-        for eid in self.eids:
-            self.bw[eid] = {}
-            for mark in self.marks:
-                p = self.data_dir / f"hist/{eid}-{mark}.bw"
-                if not p.exists():
-                    logger.warning(f"缺少 bigWig: {p}")
-                    continue
-                self.bw[eid][mark] = pyBigWig.open(str(p))
+        # 载入染色体长度（用于裁剪窗口）
+        self.chrom_sizes = {}
+        with open(genome_sizes) as f:
+            for line in f:
+                if not line.strip(): continue
+                chrom, size = line.split()[:2]
+                self.chrom_sizes[chrom] = int(size)
 
-        # 缩放统计（扁平 EID:MARK）
-        self.stats = {}
-        if stats_json and Path(stats_json).exists():
-            with open(stats_json, 'r') as f:
-                self.stats = json.load(f)
+        # 构建 bigWig 路径映射，不在 __init__ 打开文件（避免跨进程）
+        self.bw_paths = {}
+        self.marks = list(marks_core) + (list(marks_extra) if use_extra and marks_extra else [])
+        for eid in eids:
+            for mark in self.marks:
+                path = Path(data_dir) / "hist" / f"{eid}-{mark}.bw"
+                self.bw_paths[(eid, mark)] = str(path)
+
+        # 每进程懒加载句柄缓存
+        self._bw_cache = {}
+        self._pid = os.getpid()
 
         # 构建样本索引（(gene_id, eid, chrom, start, end, strand, enh_list)）
         self.samples = []
@@ -155,23 +148,79 @@ class RoadmapDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
+    def _reset_cache_if_forked(self):
+        pid = os.getpid()
+        if pid != self._pid:
+            # 子进程：清空并重置缓存（避免复用主进程句柄）
+            self._bw_cache = {}
+            self._pid = pid
+
+    def _get_bw(self, eid, mark):
+        self._reset_cache_if_forked()
+        key = (eid, mark)
+        h = self._bw_cache.get(key)
+        if h is None:
+            path = self.bw_paths.get(key)
+            if path and os.path.exists(path):
+                try:
+                    h = pyBigWig.open(path)
+                except Exception:
+                    h = None
+            self._bw_cache[key] = h
+        return h
+
+    def _safe_window(self, chrom, start, end):
+        # 将窗口裁剪到合法范围，无法裁剪时返回 None
+        if chrom not in self.chrom_sizes:
+            return None, None, None
+        size = self.chrom_sizes[chrom]
+        s = max(0, int(start))
+        e = min(int(end), size)
+        if e <= s:
+            return None, None, None
+        return chrom, s, e
+
     def _get_vals(self, eid, mark, chrom, start, end):
-        handler = self.bw.get(eid, {}).get(mark, None)
-        if handler is None:
-            return np.zeros(end-start, dtype=np.float32)
-        vals = handler.values(chrom, start, end, numpy=True)
-        if vals is None:
-            return np.zeros(end-start, dtype=np.float32)
-        vals = np.nan_to_num(vals, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
-        return vals
+        # 返回长度为 (end-start) 的 np.float32 数组；异常时返回全零
+        L = int(end - start)
+        if L <= 0:
+            return np.zeros((0,), dtype=np.float32)
+        # 窗口裁剪
+        adj = self._safe_window(chrom, start, end)
+        if adj[0] is None:
+            return np.zeros((L,), dtype=np.float32)
+        chrom2, s2, e2 = adj
+        h = self._get_bw(eid, mark)
+        if h is None:
+            return np.zeros((L,), dtype=np.float32)
+        try:
+            vals = np.array(h.values(chrom2, s2, e2, numpy=True), dtype=np.float32)
+            # 对齐长度：前后用0填充到原始 L
+            pre = s2 - int(start)
+            post = int(end) - e2
+            if pre > 0:
+                vals = np.pad(vals, (pre, 0), mode='constant', constant_values=0.0)
+            if post > 0:
+                vals = np.pad(vals, (0, post), mode='constant', constant_values=0.0)
+            if vals.size != L:
+                # 兜底截断/填充
+                if vals.size > L:
+                    vals = vals[:L]
+                else:
+                    vals = np.pad(vals, (0, L - vals.size), mode='constant', constant_values=0.0)
+            return vals
+        except Exception:
+            # pyBigWig 取值失败：返回全零，避免崩溃
+            return np.zeros((L,), dtype=np.float32)
 
     def _normalize(self, eid, mark, arr):
-        # 先用全局 stats（EID:MARK 扁平键），找不到时回退窗口内分位
+        # 使用扁平键 EID:MARK
         s = self.stats.get(f"{eid}:{mark}", None)
         if s is None:
             q1, q99 = np.quantile(arr, [0.01, 0.99])
         else:
-            q1, q99 = float(s.get('q1', 0.0)), float(s['q99'])
+            q1 = float(s.get('q1', 0.0))
+            q99 = float(s.get('q99', 0.0))
         if not np.isfinite(q99) or q99 <= q1:
             q1, q99 = float(np.min(arr)), float(np.max(arr) + 1e-6)
         arr = np.clip(arr, q1, q99)

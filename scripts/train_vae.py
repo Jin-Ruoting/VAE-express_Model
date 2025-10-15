@@ -29,18 +29,22 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
 
-    # 使用Dataset封装
-    train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')
     cfg = yaml.safe_load(open('config/config.yaml'))
-    marks = list(cfg['marks']['core']) + (cfg['marks'].get('extra',[]) if cfg.get('use_extra') else [])
-    in_channels = len(marks)  # 应为7
+    marks = list(cfg['marks']['core']) + (cfg['marks'].get('extra', []) if cfg.get('use_extra') else [])
+    in_channels = len(marks)
+    seq_len = infer_seq_len_from_promoters(cfg['paths']['promoters_bed'], default_len=2000)
 
-    # 根据Dataset通道与长度更新模型输入
-    sample_X, _ = next(iter(train_loader))
-    C, L = sample_X.shape[1], sample_X.shape[2]
-    print(f"Input channels={C}, seq_len={L}")
+    train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')
 
-    model = VAE(input_channels=C, latent_dim=64, sequence_length=L).to(device)
+    # 不从 DataLoader 提前取 batch
+    n_train = len(getattr(train_loader, 'dataset', []))
+    n_val = len(getattr(val_loader, 'dataset', []))
+    n_test = len(getattr(test_loader, 'dataset', []))
+    print(f"Dataset sizes -> train={n_train}, val={n_val}, test={n_test}, channels={in_channels}, seq_len≈{seq_len}")
+    if n_train == 0:
+        raise RuntimeError("训练集样本为0。")
+
+    model = VAE(input_channels=in_channels, latent_dim=64, sequence_length=seq_len)
     optim = torch.optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-4)
 
     # 多卡与设备放置
