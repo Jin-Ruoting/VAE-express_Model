@@ -46,15 +46,20 @@ class RoadmapDataset(Dataset):
 
         # 载入表达矩阵
         self.exp = pd.read_csv(expression_tsv, sep='\t')
-        # 假设第一列为gene_id或gene_symbol；尝试推断
+        # 统一 gene_id 列名
         if 'gene' in self.exp.columns[0].lower() or 'gene_id' in self.exp.columns[0].lower():
             self.gene_col = self.exp.columns[0]
         else:
             self.exp.rename(columns={self.exp.columns[0]:'gene_id'}, inplace=True)
             self.gene_col = 'gene_id'
-        # 仅保留需要的EID列
+        # 数值化表达列，NaN 用0填充，避免后续 drop 掉全部
+        for eid in eids:
+            if eid in self.exp.columns:
+                self.exp[eid] = pd.to_numeric(self.exp[eid], errors='coerce').fillna(0.0).clip(lower=0)
+        # 去版本号，保证与 promoters 对齐
+        self.exp[self.gene_col] = self.exp[self.gene_col].astype(str).str.replace(r'\.\d+$','', regex=True)
         keep_cols = [self.gene_col] + [eid for eid in self.eids if eid in self.exp.columns]
-        self.exp = self.exp[keep_cols].dropna()
+        self.exp = self.exp[keep_cols]
         self.exp.set_index(self.gene_col, inplace=True)
 
         # 可选zscore统计
@@ -66,9 +71,10 @@ class RoadmapDataset(Dataset):
                 self.exp_mean[eid] = float(np.mean(v))
                 self.exp_std[eid] = float(np.std(v) + 1e-6)
 
-        # 载入promoter窗口
+        # 载入promoter窗口并去版本号
         prom_cols = ['chrom','start','end','gene_id','score','strand']
         promoters = pd.read_csv(promoters_bed, sep='\t', header=None, names=prom_cols)
+        promoters['gene_id'] = promoters['gene_id'].astype(str).str.replace(r'\.\d+$','', regex=True)
         promoters = promoters[promoters['gene_id'].isin(self.exp.index)]
 
         # 载入增强子映射（可选，Promoter-only时不需要）
@@ -93,7 +99,7 @@ class RoadmapDataset(Dataset):
                     continue
                 self.bw[eid][mark] = pyBigWig.open(str(p))
 
-        # 缩放统计
+        # 缩放统计（扁平 EID:MARK）
         self.stats = {}
         if stats_json and Path(stats_json).exists():
             with open(stats_json, 'r') as f:
@@ -102,21 +108,34 @@ class RoadmapDataset(Dataset):
         # 构建样本索引（(gene_id, eid, chrom, start, end, strand, enh_list)）
         self.samples = []
         half = promoter_bp // 2
+
+        # 调试计数
+        debug = os.getenv('DATASET_DEBUG','0') == '1'
+        cnt = {
+            'genes_total': 0,
+            'after_promoters': 0,
+            'after_expr': 0,
+        }
+
         for _, r in promoters.iterrows():
+            cnt['genes_total'] += 1
             gene = r['gene_id']
             chrom = r['chrom']
             center = (r['start'] + r['end'])//2
-            p_start = max(0, center - half)
-            p_end = center + half
+            p_start = max(0, int(center - half))
+            p_end = int(center + half)
             strand = r['strand']
+            cnt['after_promoters'] += 1
             for eid in self.eids:
-                if eid not in self.exp.columns:  # 确保该EID有表达列
+                if eid not in self.exp.columns:
                     continue
-                y_raw = self.exp.at[gene, eid] if gene in self.exp.index else np.nan
-                if pd.isna(y_raw): 
+                y_raw = float(self.exp.at[gene, eid]) if gene in self.exp.index else float('nan')
+                if pd.isna(y_raw):
                     continue
-                if y_raw <= min_expr_threshold:
-                    # 可选过滤低表达
+                # 按需过滤低表达（默认不过滤）
+                if (min_expr_threshold is not None) and (y_raw <= float(min_expr_threshold)):
+                    # 如果希望过滤，改为 continue
+                    # continue
                     pass
                 enh_list = []
                 if self.use_enhancers and self.enhancers is not None:
@@ -124,13 +143,14 @@ class RoadmapDataset(Dataset):
                     sub = sub.sort_values('score', ascending=False).head(self.top_k)
                     for _, er in sub.iterrows():
                         enh_list.append((er['enh_chr'], int(er['enh_start']), int(er['enh_end'])))
-                self.samples.append((gene, eid, chrom, int(p_start), int(p_end), strand, enh_list))
+                self.samples.append((gene, eid, chrom, p_start, p_end, strand, enh_list))
+                cnt['after_expr'] += 1
 
-        # 输入总长度
-        self.seq_len = promoter_bp + (len(enh_list)*enhancer_bp if self.use_enhancers else 0)
+        self.seq_len = promoter_bp + (len(enh_list)*enhancer_bp if self.use_enhancers and len(self.samples)>0 else 0)
         self.input_channels = len(self.marks)
-
         logger.info(f"Dataset built: samples={len(self.samples)}, channels={self.input_channels}, L={self.seq_len}")
+        if debug:
+            print('[DATASET DEBUG]', json.dumps(cnt))
 
     def __len__(self):
         return len(self.samples)
@@ -146,14 +166,14 @@ class RoadmapDataset(Dataset):
         return vals
 
     def _normalize(self, eid, mark, arr):
-        s = self.stats.get(eid, {}).get(mark, None)
+        # 先用全局 stats（EID:MARK 扁平键），找不到时回退窗口内分位
+        s = self.stats.get(f"{eid}:{mark}", None)
         if s is None:
-            # 每窗口鲁棒缩放（回退策略）
             q1, q99 = np.quantile(arr, [0.01, 0.99])
         else:
-            q1, q99 = s['q1'], s['q99']
-        if q99 <= q1:
-            q1, q99 = float(np.min(arr)), float(np.max(arr)+1e-6)
+            q1, q99 = float(s.get('q1', 0.0)), float(s['q99'])
+        if not np.isfinite(q99) or q99 <= q1:
+            q1, q99 = float(np.min(arr)), float(np.max(arr) + 1e-6)
         arr = np.clip(arr, q1, q99)
         arr = (arr - q1) / (q99 - q1 + 1e-6)
         return arr.astype(np.float32)
@@ -192,54 +212,6 @@ class RoadmapDataset(Dataset):
             y = (y - mu) / sd
         return torch.from_numpy(X), torch.tensor(y, dtype=torch.float32)
 
-    def _load_stats(self, cfg):
-        # 原本加载 stats 的位置（示意）
-        stats_path = cfg['paths']['stats_json']
-        with open(stats_path) as f:
-            stats = json.load(f)
-        debug = os.getenv('DATASET_DEBUG', '0') == '1'
-        if debug:
-            colon_keys = sum(1 for k in stats.keys() if isinstance(k, str) and ':' in k)
-            print(f"[DATASET] stats_path={stats_path} keys={len(stats)} colon_keys={colon_keys}")
-            # 简查 q99 是否有效
-            bad = []
-            for k,v in list(stats.items())[:20]:
-                q99 = v.get('q99', None) if isinstance(v, dict) else None
-                if q99 is None or not isinstance(q99,(int,float)) or not math.isfinite(q99) or q99<=0:
-                    bad.append((k,q99))
-            if bad:
-                print(f"[DATASET] sample bad stats: {bad[:5]}")
-        return stats
-
-    def _build(self):
-        debug = os.getenv('DATASET_DEBUG','0') == '1'
-        cnt = {
-            'genes_total': 0,
-            'after_promoters': 0,
-            'after_bw_read': 0,
-            'after_norm': 0,
-            'dropped_no_promoter': 0,
-            'dropped_missing_bw': 0,
-            'dropped_bad_stats': 0,
-            'dropped_all_nan': 0,
-            'dropped_all_zero': 0,
-        }
-        # 原有构建循环中，各种 continue 前后分别累计计数
-        # 用伪代码标注应放置的位置：
-        # for gene in genes:
-        #     cnt['genes_total'] += 1
-        #     if no_promoter_for_gene: cnt['dropped_no_promoter'] += 1; continue
-        #     cnt['after_promoters'] += 1
-        #     if missing_any_bw: cnt['dropped_missing_bw'] += 1; continue
-        #     if missing_stats_or_invalid: cnt['dropped_bad_stats'] += 1; continue
-        #     if window_all_nan: cnt['dropped_all_nan'] += 1; continue
-        #     if normalized_all_zero: cnt['dropped_all_zero'] += 1; continue
-        #     cnt['after_norm'] += 1
-        #     self.samples.append(...)
-        # ...existing code building self.samples...
-        if debug:
-            print('[DATASET DEBUG]', json.dumps(cnt))
-
 def create_dataloaders(config):
     """
     使用 config/config.yaml 中的设定创建 DataLoader
@@ -256,10 +228,10 @@ def create_dataloaders(config):
         genome_sizes=cfg["paths"]["genome_sizes"],
         eids=cfg["eids"],
         marks_core=cfg["marks"]["core"],
-        marks_extra=cfg["marks"]["extra"],
+        marks_extra=cfg["marks"].get("extra", []),
         use_extra=cfg.get("use_extra", False),
         promoter_bp=cfg["sequence"]["promoter_bp"],
-        use_enhancers=False,   # 先跑 Promoter-only，后续改 True 并提供 enhancer_map
+        use_enhancers=False,
         enhancer_map_tsv=cfg["paths"].get("enhancer_map", None),
         enhancer_bp=cfg["sequence"]["enhancer_bp"],
         top_k=cfg["sequence"]["top_k"],
@@ -267,9 +239,10 @@ def create_dataloaders(config):
         min_expr_threshold=0.0,
         zscore_per_eid=False
     )
-
-    train_ratio, val_ratio = 0.7, 0.2
     N = len(ds)
+    if N == 0:
+        raise RuntimeError("RoadmapDataset 构建后样本数为0，请检查 gene_id 对齐、stats 键格式、以及是否误保留了重复的 _build 定义。")
+    train_ratio, val_ratio = 0.7, 0.2
     n_train = int(N * train_ratio)
     n_val = int(N * val_ratio)
     n_test = N - n_train - n_val
