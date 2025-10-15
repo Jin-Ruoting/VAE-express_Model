@@ -1,4 +1,4 @@
-import json
+import os, json, math
 import numpy as np
 import pandas as pd
 import torch
@@ -191,6 +191,54 @@ class RoadmapDataset(Dataset):
             mu, sd = self.exp_mean.get(eid, 0.0), self.exp_std.get(eid, 1.0)
             y = (y - mu) / sd
         return torch.from_numpy(X), torch.tensor(y, dtype=torch.float32)
+
+    def _load_stats(self, cfg):
+        # 原本加载 stats 的位置（示意）
+        stats_path = cfg['paths']['stats_json']
+        with open(stats_path) as f:
+            stats = json.load(f)
+        debug = os.getenv('DATASET_DEBUG', '0') == '1'
+        if debug:
+            colon_keys = sum(1 for k in stats.keys() if isinstance(k, str) and ':' in k)
+            print(f"[DATASET] stats_path={stats_path} keys={len(stats)} colon_keys={colon_keys}")
+            # 简查 q99 是否有效
+            bad = []
+            for k,v in list(stats.items())[:20]:
+                q99 = v.get('q99', None) if isinstance(v, dict) else None
+                if q99 is None or not isinstance(q99,(int,float)) or not math.isfinite(q99) or q99<=0:
+                    bad.append((k,q99))
+            if bad:
+                print(f"[DATASET] sample bad stats: {bad[:5]}")
+        return stats
+
+    def _build(self):
+        debug = os.getenv('DATASET_DEBUG','0') == '1'
+        cnt = {
+            'genes_total': 0,
+            'after_promoters': 0,
+            'after_bw_read': 0,
+            'after_norm': 0,
+            'dropped_no_promoter': 0,
+            'dropped_missing_bw': 0,
+            'dropped_bad_stats': 0,
+            'dropped_all_nan': 0,
+            'dropped_all_zero': 0,
+        }
+        # 原有构建循环中，各种 continue 前后分别累计计数
+        # 用伪代码标注应放置的位置：
+        # for gene in genes:
+        #     cnt['genes_total'] += 1
+        #     if no_promoter_for_gene: cnt['dropped_no_promoter'] += 1; continue
+        #     cnt['after_promoters'] += 1
+        #     if missing_any_bw: cnt['dropped_missing_bw'] += 1; continue
+        #     if missing_stats_or_invalid: cnt['dropped_bad_stats'] += 1; continue
+        #     if window_all_nan: cnt['dropped_all_nan'] += 1; continue
+        #     if normalized_all_zero: cnt['dropped_all_zero'] += 1; continue
+        #     cnt['after_norm'] += 1
+        #     self.samples.append(...)
+        # ...existing code building self.samples...
+        if debug:
+            print('[DATASET DEBUG]', json.dumps(cnt))
 
 def create_dataloaders(config):
     """
