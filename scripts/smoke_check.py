@@ -49,6 +49,52 @@ def safe_pearson(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     r = np.corrcoef(y_true, y_pred)[0, 1]
     return float(r) if np.isfinite(r) else 0.0
 
+def call_loss(out, y, kl_beta=1e-5, device='cpu'):
+    """
+    兼容不同 total_vae_loss 签名与返回：
+    - 尝试：kwargs(kl_beta) -> 位置参数 -> 无 kl_beta
+    - 返回形状支持：5元组(loss,recon,kl,expr,y_pred) / 4元组(无y_pred) / 3元组(无expr,y_pred) / 仅loss张量
+    """
+    attempts = [
+        lambda: total_vae_loss(out, y, kl_beta=kl_beta),
+        lambda: total_vae_loss(out, y, kl_beta),
+        lambda: total_vae_loss(out, y),
+    ]
+    last_err = None
+    for fn in attempts:
+        try:
+            ret = fn()
+            break
+        except TypeError as e:
+            last_err = e
+            ret = None
+    if ret is None:
+        # 仍不支持，抛出更友好的错误
+        raise TypeError(f"total_vae_loss 签名不兼容，请检查实现。最后错误: {last_err}")
+
+    # 解析返回
+    if torch.is_tensor(ret):
+        loss = ret
+        zero = torch.zeros([], device=device, dtype=loss.dtype)
+        return loss, zero, zero, zero, None
+    if isinstance(ret, (list, tuple)):
+        if len(ret) == 5:
+            return ret
+        if len(ret) == 4:
+            loss, recon, kl, expr = ret
+            return loss, recon, kl, expr, None
+        if len(ret) == 3:
+            loss, recon, kl = ret
+            zero = torch.zeros([], device=device, dtype=loss.dtype)
+            return loss, recon, kl, zero, None
+    # 未知形态，尽力而为
+    try:
+        loss = ret[0] if isinstance(ret, (list, tuple)) else ret
+    except Exception:
+        raise RuntimeError("无法解析 total_vae_loss 的返回值，请统一为 (loss,recon,kl[,expr[,y_pred]])")
+    zero = torch.zeros([], device=device, dtype=loss.dtype)
+    return loss, zero, zero, zero, None
+
 def step1_config_check(cfg_path: str):
     print("== STEP1 | 配置与路径核对 ==")
     cfg = yaml.safe_load(open(cfg_path))
@@ -76,7 +122,7 @@ def step2_data_smoke(cfg_path: str, device: str):
     xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
     with torch.no_grad():
         out = model(xb)
-        loss, recon, kl, expr, y_pred = total_vae_loss(out, yb, kl_beta=1e-5)
+        loss, recon, kl, expr, y_pred = call_loss(out, yb, kl_beta=1e-5, device=device)
         parts = [loss, recon, kl, expr]
         ok = all(torch.isfinite(t) for t in parts)
         print(f"- batch: X={tuple(xb.shape)}, finite_loss={ok}, loss={float(loss):.6f}, recon={float(recon):.6f}, kl={float(kl):.6f}, expr={float(expr):.6f}")
@@ -95,7 +141,7 @@ def step3_tiny_train(train_loader, device: str, in_ch: int, seq_len: int):
         xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
         opt.zero_grad(set_to_none=True)
         out = model(xb)
-        loss, recon, kl, expr, _ = total_vae_loss(out, yb, kl_beta=1e-5)
+        loss, recon, kl, expr, _ = call_loss(out, yb, kl_beta=1e-5, device=device)
         if not torch.isfinite(loss):
             skipped += 1
             continue
@@ -116,7 +162,7 @@ def step4_metric_sanity(train_loader, device: str, in_ch: int, seq_len: int):
                 break
             xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
             out = model(xb)
-            _, _, _, _, y_pred = total_vae_loss(out, yb, kl_beta=1e-5)
+            _, _, _, _, y_pred = call_loss(out, yb, kl_beta=1e-5, device=device)
             if y_pred is None:
                 continue
             yp = safe_t(y_pred).detach().cpu().numpy().ravel()
