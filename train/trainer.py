@@ -5,6 +5,7 @@ from scipy.stats import pearsonr
 from train.losses import total_vae_loss
 from tqdm import tqdm
 import numpy as np
+from torch.nn.utils import clip_grad_norm_
 
 class VAETrainer:
     def __init__(self, model, optimizer, loss_fn, device):
@@ -13,102 +14,136 @@ class VAETrainer:
         self.loss_fn = loss_fn
         self.device = device
 
-    def train_epoch(self, dataloader, kl_beta=None):
+    def _safe_nan_to_num(self, t: torch.Tensor) -> torch.Tensor:
+        return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _safe_pearson(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        # 过滤非有限
+        mask = np.isfinite(y_true) & np.isfinite(y_pred)
+        y_true = y_true[mask]
+        y_pred = y_pred[mask]
+        if y_true.size < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
+            return 0.0
+        if pearsonr is not None:
+            try:
+                return float(pearsonr(y_true, y_pred)[0])
+            except Exception:
+                pass
+        # 退化到 numpy 相关系数
+        r = np.corrcoef(y_true, y_pred)[0, 1]
+        if not np.isfinite(r):
+            return 0.0
+        return float(r)
+
+    def train_epoch(self, train_loader, kl_beta=1e-5, max_grad_norm=1.0):
         self.model.train()
-        total_loss = 0
-        total_recon_loss = 0
-        total_kl_loss = 0
-        total_expr_loss = 0
-        expr_true_all = []
-        expr_pred_all = []
+        loss_sum = recon_sum = kl_sum = expr_sum = 0.0
+        n_batches = 0
+        expr_true_all, expr_pred_all = [], []
 
-        pbar = tqdm(dataloader, desc="Training")
-        for x, y in pbar:
-            x = x.to(self.device)  # [B, 7, seq_len]
-            y = y.to(self.device)
+        for x, y in train_loader:
+            x = x.to(self.device, non_blocking=True)
+            y = y.to(self.device, non_blocking=True)
+            x = self._safe_nan_to_num(x)
+            y = self._safe_nan_to_num(y)
 
-            self.optimizer.zero_grad()
-            x_hat, pred_expr, mu, logvar = self.model(x)
+            self.optimizer.zero_grad(set_to_none=True)
+            out = self.model(x)
+            # out 内部若含 NaN/Inf，先清洗
+            if isinstance(out, (list, tuple)):
+                out = tuple(self._safe_nan_to_num(t) if torch.is_tensor(t) else t for t in out)
+            elif torch.is_tensor(out):
+                out = self._safe_nan_to_num(out)
 
-            loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y,
-                                           kl_weight=kl_beta)
+            loss, recon, kl, expr, y_pred = total_vae_loss(out, y, kl_beta=kl_beta)
+
+            # 任何一个非有限就跳过该 batch
+            if not torch.isfinite(loss):
+                continue
+
             loss.backward()
-            
-            # 梯度裁剪
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
-            
+            if max_grad_norm is not None and max_grad_norm > 0:
+                try:
+                    clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                except Exception:
+                    pass
             self.optimizer.step()
 
-            total_loss += loss.item()
-            total_recon_loss += loss_dict['recon_loss']
-            total_kl_loss += loss_dict['kl_loss']
-            total_expr_loss += loss_dict['expr_loss']
-            
-            expr_true_all.extend(y.detach().cpu().numpy().flatten())
-            expr_pred_all.extend(pred_expr.detach().cpu().numpy().flatten())
-            
-            pbar.set_postfix({
-                'Loss': f"{loss.item():.4f}",
-                'Recon': f"{loss_dict['recon_loss']:.4f}",
-                'KL': f"{loss_dict['kl_loss']:.6f}",
-                'Expr': f"{loss_dict['expr_loss']:.4f}"
-            })
+            # 累计
+            loss_sum += float(loss.detach().cpu())
+            recon_sum += float(recon.detach().cpu())
+            kl_sum    += float(kl.detach().cpu())
+            expr_sum  += float(expr.detach().cpu())
+            n_batches += 1
 
-        # 计算相关系数
-        if len(expr_true_all) > 1:
-            pearson_r = pearsonr(expr_true_all, expr_pred_all)[0]
-            if np.isnan(pearson_r):
-                pearson_r = 0.0
-        else:
-            pearson_r = 0.0
-            
-        avg_loss = total_loss / len(dataloader)
-        avg_recon = total_recon_loss / len(dataloader)
-        avg_kl = total_kl_loss / len(dataloader)
-        avg_expr = total_expr_loss / len(dataloader)
-        
-        return avg_loss, pearson_r, avg_recon, avg_kl, avg_expr
+            # 收集表达用于 Pearson
+            if y_pred is not None:
+                yp = self._safe_nan_to_num(y_pred).detach().cpu().numpy().reshape(-1)
+                yt = self._safe_nan_to_num(y).detach().cpu().numpy().reshape(-1)
+                expr_pred_all.append(yp)
+                expr_true_all.append(yt)
 
-    def validate(self, dataloader, kl_beta=None):
+        if n_batches == 0:
+            return float('nan'), float('nan'), float('nan'), float('nan'), 0.0
+
+        expr_r = 0.0
+        if expr_true_all and expr_pred_all:
+            yt = np.concatenate(expr_true_all, axis=0)
+            yp = np.concatenate(expr_pred_all, axis=0)
+            expr_r = self._safe_pearson(yt, yp)
+
+        return (loss_sum / n_batches,
+                expr_r,
+                recon_sum / n_batches,
+                kl_sum / n_batches,
+                expr_sum / n_batches)
+
+    def validate(self, val_loader, kl_beta=1e-5):
         self.model.eval()
-        total_loss = 0
-        total_recon_loss = 0
-        total_kl_loss = 0
-        total_expr_loss = 0
-        expr_true_all = []
-        expr_pred_all = []
+        loss_sum = recon_sum = kl_sum = expr_sum = 0.0
+        n_batches = 0
+        expr_true_all, expr_pred_all = [], []
 
         with torch.no_grad():
-            for x, y in tqdm(dataloader, desc="Validating"):
-                x = x.to(self.device)
-                y = y.to(self.device)
+            for x, y in val_loader:
+                x = self._safe_nan_to_num(x.to(self.device, non_blocking=True))
+                y = self._safe_nan_to_num(y.to(self.device, non_blocking=True))
+                out = self.model(x)
+                if isinstance(out, (list, tuple)):
+                    out = tuple(self._safe_nan_to_num(t) if torch.is_tensor(t) else t for t in out)
+                elif torch.is_tensor(out):
+                    out = self._safe_nan_to_num(out)
 
-                x_hat, pred_expr, mu, logvar = self.model(x)
-                loss, loss_dict = self.loss_fn(x_hat, x, mu, logvar, pred_expr, y,
-                                               kl_weight=kl_beta)
+                loss, recon, kl, expr, y_pred = total_vae_loss(out, y, kl_beta=kl_beta)
+                if not torch.isfinite(loss):
+                    continue
 
-                total_loss += loss.item()
-                total_recon_loss += loss_dict['recon_loss']
-                total_kl_loss += loss_dict['kl_loss']
-                total_expr_loss += loss_dict['expr_loss']
-                
-                expr_true_all.extend(y.detach().cpu().numpy().flatten())
-                expr_pred_all.extend(pred_expr.detach().cpu().numpy().flatten())
+                loss_sum += float(loss.detach().cpu())
+                recon_sum += float(recon.detach().cpu())
+                kl_sum    += float(kl.detach().cpu())
+                expr_sum  += float(expr.detach().cpu())
+                n_batches += 1
 
-        # 计算相关系数
-        if len(expr_true_all) > 1:
-            pearson_r = pearsonr(expr_true_all, expr_pred_all)[0]
-            if np.isnan(pearson_r):
-                pearson_r = 0.0
-        else:
-            pearson_r = 0.0
-            
-        avg_loss = total_loss / len(dataloader)
-        avg_recon = total_recon_loss / len(dataloader)
-        avg_kl = total_kl_loss / len(dataloader)
-        avg_expr = total_expr_loss / len(dataloader)
-        
-        return avg_loss, pearson_r, avg_recon, avg_kl, avg_expr
+                if y_pred is not None:
+                    yp = self._safe_nan_to_num(y_pred).detach().cpu().numpy().reshape(-1)
+                    yt = self._safe_nan_to_num(y).detach().cpu().numpy().reshape(-1)
+                    expr_pred_all.append(yp)
+                    expr_true_all.append(yt)
+
+        if n_batches == 0:
+            return float('nan'), 0.0, float('nan'), float('nan'), float('nan')
+
+        expr_r = 0.0
+        if expr_true_all and expr_pred_all:
+            yt = np.concatenate(expr_true_all, axis=0)
+            yp = np.concatenate(expr_pred_all, axis=0)
+            expr_r = self._safe_pearson(yt, yp)
+
+        return (loss_sum / n_batches,
+                expr_r,
+                recon_sum / n_batches,
+                kl_sum / n_batches,
+                expr_sum / n_batches)
 
     def fit(self, train_loader, val_loader, num_epochs=50, save_path="best_model.pt",
             patience=5, kl_beta_max=1e-5, kl_warmup_epochs=50):

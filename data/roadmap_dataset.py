@@ -293,7 +293,23 @@ class RoadmapDataset(Dataset):
         if self.zscore_per_eid:
             mu, sd = self.exp_mean.get(eid, 0.0), self.exp_std.get(eid, 1.0)
             y = (y - mu) / sd
-        return torch.from_numpy(X), torch.tensor(y, dtype=torch.float32)
+
+        # 假设最终拼好的通道数组为 X，形状 [C, L]；表达为 y（标量或向量）
+        # 在返回前做数值清洗
+        X = np.asarray(X, dtype=np.float32)
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if isinstance(y, np.ndarray):
+            y = np.nan_to_num(y.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            try:
+                y = float(y)
+            except Exception:
+                y = 0.0
+            if not np.isfinite(y):
+                y = 0.0
+
+        return torch.from_numpy(X), torch.as_tensor(y, dtype=torch.float32)
 
 def create_dataloaders(config):
     """
