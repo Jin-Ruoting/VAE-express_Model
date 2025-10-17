@@ -1,7 +1,9 @@
 # train/trainer.py
 
+import os
 import torch
 from scipy.stats import pearsonr
+from torch.utils.data import DataLoader
 from train.losses import total_vae_loss
 from tqdm import tqdm
 import numpy as np
@@ -17,23 +19,90 @@ class VAETrainer:
     def _safe_nan_to_num(self, t: torch.Tensor) -> torch.Tensor:
         return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _safe_pearson(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        # 过滤非有限
-        mask = np.isfinite(y_true) & np.isfinite(y_pred)
-        y_true = y_true[mask]
-        y_pred = y_pred[mask]
-        if y_true.size < 2 or np.std(y_true) == 0 or np.std(y_pred) == 0:
-            return 0.0
-        if pearsonr is not None:
+    def _align_expr_shapes(self, pred_expr: torch.Tensor, y: torch.Tensor):
+        pe, ty = pred_expr, y
+        if pe.dim() == 1: pe = pe.view(pe.shape[0], 1)
+        elif pe.dim() > 2: pe = pe.view(pe.shape[0], -1)
+        if ty.dim() == 1: ty = ty.view(ty.shape[0], 1)
+        elif ty.dim() > 2: ty = ty.view(ty.shape[0], -1)
+        if pe.shape[1] != ty.shape[1]:
+            if pe.shape[1] > 1 and ty.shape[1] == 1:
+                pe = pe.mean(dim=1, keepdim=True)
+            else:
+                d = min(pe.shape[1], ty.shape[1])
+                pe = pe[:, :d]; ty = ty[:, :d]
+        return pe, ty
+
+    def _parse_model_out(self, out, x: torch.Tensor, y: torch.Tensor):
+        # 支持 tuple/list/dict/单张量
+        x_hat = mu = logvar = pred_expr = None
+        if isinstance(out, (list, tuple)):
+            if len(out) >= 4:
+                x_hat, mu, logvar, pred_expr = out[0], out[1], out[2], out[3]
+            elif len(out) == 3:
+                x_hat, mu, logvar = out
+                pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+            elif len(out) == 2:
+                x_hat, mu = out
+                logvar = torch.zeros_like(mu)
+                pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+            elif len(out) == 1:
+                x_hat = out[0]
+                mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+                logvar = torch.zeros_like(mu)
+                pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+        elif isinstance(out, dict):
+            x_hat = out.get('x_hat') or out.get('recon') or out.get('recon_x') or out.get('x_recon')
+            mu = out.get('mu')
+            logvar = out.get('logvar') or out.get('log_var') or out.get('log_sigma2')
+            pred_expr = out.get('pred_expr') or out.get('expr') or out.get('y_pred') \
+                        or torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+            if x_hat is None:
+                raise RuntimeError("模型输出字典中缺少 x_hat/recon。")
+            if mu is None:
+                mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+            if logvar is None:
+                logvar = torch.zeros_like(mu)
+        elif torch.is_tensor(out):
+            x_hat = out
+            mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+            logvar = torch.zeros_like(mu)
+            pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+        else:
+            raise TypeError(f"不支持的模型输出类型: {type(out)}")
+
+        # 数值清洗与形状对齐
+        x_hat = self._safe_nan_to_num(x_hat)
+        mu = self._safe_nan_to_num(mu)
+        logvar = self._safe_nan_to_num(logvar)
+        pred_expr = self._safe_nan_to_num(pred_expr)
+        pred_expr, y = self._align_expr_shapes(pred_expr, y)
+        return x_hat, mu, logvar, pred_expr, y
+
+    def _compute_loss(self, out, x, y, kl_beta):
+        """
+        兼容 total_vae_loss 的两类签名：
+        1) 旧版: total_vae_loss(out, y, kl_beta=...) 或位置参数
+        2) 新版: total_vae_loss(x_hat, x, mu, logvar, pred_expr, y) -> (total, dict)
+        返回: (loss_tensor, recon_tensor, kl_tensor, expr_tensor, y_pred_tensor或None)
+        """
+        # 优先尝试旧签名
+        try:
+            return total_vae_loss(out, y, kl_beta=kl_beta)
+        except TypeError:
             try:
-                return float(pearsonr(y_true, y_pred)[0])
-            except Exception:
+                return total_vae_loss(out, y, kl_beta)
+            except TypeError:
                 pass
-        # 退化到 numpy 相关系数
-        r = np.corrcoef(y_true, y_pred)[0, 1]
-        if not np.isfinite(r):
-            return 0.0
-        return float(r)
+
+        # 解析为新签名
+        x_hat, mu, logvar, pred_expr, y_aligned = self._parse_model_out(out, x, y)
+        total, parts = total_vae_loss(x_hat, x, mu, logvar, pred_expr, y_aligned)
+        device = total.device
+        recon = torch.tensor(parts.get('recon_loss', 0.0), device=device, dtype=total.dtype)
+        kl    = torch.tensor(parts.get('kl_loss', 0.0),   device=device, dtype=total.dtype)
+        expr  = torch.tensor(parts.get('expr_loss', 0.0), device=device, dtype=total.dtype)
+        return total, recon, kl, expr, pred_expr
 
     def train_epoch(self, train_loader, kl_beta=1e-5, max_grad_norm=1.0):
         self.model.train()
@@ -42,31 +111,20 @@ class VAETrainer:
         expr_true_all, expr_pred_all = [], []
 
         for x, y in train_loader:
-            x = x.to(self.device, non_blocking=True)
-            y = y.to(self.device, non_blocking=True)
-            x = self._safe_nan_to_num(x)
-            y = self._safe_nan_to_num(y)
+            x = self._safe_nan_to_num(x.to(self.device, non_blocking=True))
+            y = self._safe_nan_to_num(y.to(self.device, non_blocking=True))
 
             self.optimizer.zero_grad(set_to_none=True)
             out = self.model(x)
-            # out 内部若含 NaN/Inf，先清洗
-            if isinstance(out, (list, tuple)):
-                out = tuple(self._safe_nan_to_num(t) if torch.is_tensor(t) else t for t in out)
-            elif torch.is_tensor(out):
-                out = self._safe_nan_to_num(out)
-
-            loss, recon, kl, expr, y_pred = total_vae_loss(out, y, kl_beta=kl_beta)
+            loss, recon, kl, expr, y_pred = self._compute_loss(out, x, y, kl_beta)
 
             # 任何一个非有限就跳过该 batch
             if not torch.isfinite(loss):
                 continue
 
             loss.backward()
-            if max_grad_norm is not None and max_grad_norm > 0:
-                try:
-                    clip_grad_norm_(self.model.parameters(), max_grad_norm)
-                except Exception:
-                    pass
+            if max_grad_norm and max_grad_norm > 0:
+                clip_grad_norm_(self.model.parameters(), max_grad_norm)
             self.optimizer.step()
 
             # 累计
@@ -84,13 +142,16 @@ class VAETrainer:
                 expr_true_all.append(yt)
 
         if n_batches == 0:
-            return float('nan'), float('nan'), float('nan'), float('nan'), 0.0
+            return float('nan'), 0.0, float('nan'), float('nan'), float('nan')
 
         expr_r = 0.0
         if expr_true_all and expr_pred_all:
             yt = np.concatenate(expr_true_all, axis=0)
             yp = np.concatenate(expr_pred_all, axis=0)
-            expr_r = self._safe_pearson(yt, yp)
+            m = np.isfinite(yt) & np.isfinite(yp)
+            yt, yp = yt[m], yp[m]
+            if yt.size >= 2 and np.std(yt) > 0 and np.std(yp) > 0:
+                expr_r = float(np.corrcoef(yt, yp)[0, 1])
 
         return (loss_sum / n_batches,
                 expr_r,
@@ -109,12 +170,8 @@ class VAETrainer:
                 x = self._safe_nan_to_num(x.to(self.device, non_blocking=True))
                 y = self._safe_nan_to_num(y.to(self.device, non_blocking=True))
                 out = self.model(x)
-                if isinstance(out, (list, tuple)):
-                    out = tuple(self._safe_nan_to_num(t) if torch.is_tensor(t) else t for t in out)
-                elif torch.is_tensor(out):
-                    out = self._safe_nan_to_num(out)
+                loss, recon, kl, expr, y_pred = self._compute_loss(out, x, y, kl_beta)
 
-                loss, recon, kl, expr, y_pred = total_vae_loss(out, y, kl_beta=kl_beta)
                 if not torch.isfinite(loss):
                     continue
 
@@ -137,7 +194,10 @@ class VAETrainer:
         if expr_true_all and expr_pred_all:
             yt = np.concatenate(expr_true_all, axis=0)
             yp = np.concatenate(expr_pred_all, axis=0)
-            expr_r = self._safe_pearson(yt, yp)
+            m = np.isfinite(yt) & np.isfinite(yp)
+            yt, yp = yt[m], yp[m]
+            if yt.size >= 2 and np.std(yt) > 0 and np.std(yp) > 0:
+                expr_r = float(np.corrcoef(yt, yp)[0, 1])
 
         return (loss_sum / n_batches,
                 expr_r,
