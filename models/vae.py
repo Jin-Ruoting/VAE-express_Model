@@ -132,12 +132,13 @@ class ExpressionRegressor(nn.Module):
         self.regressor = nn.Sequential(*layers)
 
     def forward(self, z):
-        return self.regressor(z).squeeze(-1)
+        return self.regressor(z)
 
 
 class VAE(nn.Module):
     def __init__(self, input_channels=7, latent_dim=64, sequence_length=2000):
         super(VAE, self).__init__()
+        self.latent_dim = latent_dim
         self.encoder = Encoder(input_channels, latent_dim, sequence_length)
         self.decoder = Decoder(input_channels, latent_dim, sequence_length)
         self.regressor = ExpressionRegressor(latent_dim)
@@ -152,4 +153,4 @@ class VAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         x_hat = self.decoder(z)
         expr_pred = self.regressor(z)
-        return x_hat, expr_pred, mu, logvar
+        return x_hat, mu, logvar, expr_pred
