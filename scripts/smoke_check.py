@@ -49,51 +49,83 @@ def safe_pearson(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     r = np.corrcoef(y_true, y_pred)[0, 1]
     return float(r) if np.isfinite(r) else 0.0
 
-def call_loss(out, y, kl_beta=1e-5, device='cpu'):
-    """
-    兼容不同 total_vae_loss 签名与返回：
-    - 尝试：kwargs(kl_beta) -> 位置参数 -> 无 kl_beta
-    - 返回形状支持：5元组(loss,recon,kl,expr,y_pred) / 4元组(无y_pred) / 3元组(无expr,y_pred) / 仅loss张量
-    """
-    attempts = [
-        lambda: total_vae_loss(out, y, kl_beta=kl_beta),
-        lambda: total_vae_loss(out, y, kl_beta),
-        lambda: total_vae_loss(out, y),
-    ]
-    last_err = None
-    for fn in attempts:
-        try:
-            ret = fn()
-            break
-        except TypeError as e:
-            last_err = e
-            ret = None
-    if ret is None:
-        # 仍不支持，抛出更友好的错误
-        raise TypeError(f"total_vae_loss 签名不兼容，请检查实现。最后错误: {last_err}")
+def align_expr_shapes(pred_expr: torch.Tensor, y: torch.Tensor):
+    # 统一为 [N, D] 形状，D 默认为1
+    pe = pred_expr
+    ty = y
+    if pe.dim() == 1:
+        pe = pe.view(pe.shape[0], 1)
+    elif pe.dim() > 2:
+        pe = pe.view(pe.shape[0], -1)
+    if ty.dim() == 1:
+        ty = ty.view(ty.shape[0], 1)
+    elif ty.dim() > 2:
+        ty = ty.view(ty.shape[0], -1)
+    if pe.shape[1] != ty.shape[1]:
+        # 若维度不一致，优先将 pred_expr 降到 1 维；否则截到最小公共维
+        if pe.shape[1] > 1 and ty.shape[1] == 1:
+            pe = pe.mean(dim=1, keepdim=True)
+        else:
+            d = min(pe.shape[1], ty.shape[1])
+            pe = pe[:, :d]
+            ty = ty[:, :d]
+    return pe, ty
 
-    # 解析返回
-    if torch.is_tensor(ret):
-        loss = ret
-        zero = torch.zeros([], device=device, dtype=loss.dtype)
-        return loss, zero, zero, zero, None
-    if isinstance(ret, (list, tuple)):
-        if len(ret) == 5:
-            return ret
-        if len(ret) == 4:
-            loss, recon, kl, expr = ret
-            return loss, recon, kl, expr, None
-        if len(ret) == 3:
-            loss, recon, kl = ret
-            zero = torch.zeros([], device=device, dtype=loss.dtype)
-            return loss, recon, kl, zero, None
-    # 未知形态，尽力而为
-    try:
-        loss = ret[0] if isinstance(ret, (list, tuple)) else ret
-    except Exception:
-        raise RuntimeError("无法解析 total_vae_loss 的返回值，请统一为 (loss,recon,kl[,expr[,y_pred]])")
-    zero = torch.zeros([], device=device, dtype=loss.dtype)
-    return loss, zero, zero, zero, None
+def parse_model_out(out, x: torch.Tensor, y: torch.Tensor):
+    # 支持 tuple/list/dict/单张量
+    x_hat = mu = logvar = pred_expr = None
+    if isinstance(out, (list, tuple)):
+        if len(out) >= 4:
+            x_hat, mu, logvar, pred_expr = out[0], out[1], out[2], out[3]
+        elif len(out) == 3:
+            x_hat, mu, logvar = out
+            pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+        elif len(out) == 2:
+            x_hat, mu = out
+            logvar = torch.zeros_like(mu)
+            pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+        elif len(out) == 1:
+            x_hat = out[0]
+            mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+            logvar = torch.zeros_like(mu)
+            pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+    elif isinstance(out, dict):
+        x_hat = out.get('x_hat') or out.get('recon') or out.get('recon_x') or out.get('x_recon')
+        mu = out.get('mu')
+        logvar = out.get('logvar') or out.get('log_var') or out.get('log_sigma2')
+        pred_expr = out.get('pred_expr') or out.get('expr') or out.get('y_pred') or torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+        if x_hat is None:
+            raise RuntimeError("模型输出字典中缺少 x_hat/recon。")
+        if mu is None:
+            mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+        if logvar is None:
+            logvar = torch.zeros_like(mu)
+    elif torch.is_tensor(out):
+        x_hat = out
+        mu = torch.zeros((x.shape[0], 1), device=x.device, dtype=x.dtype)
+        logvar = torch.zeros_like(mu)
+        pred_expr = torch.zeros((y.shape[0], 1), device=y.device, dtype=y.dtype)
+    else:
+        raise TypeError(f"不支持的模型输出类型: {type(out)}")
+
+    # 数值清洗
+    x_hat = safe_t(x_hat)
+    mu = safe_t(mu)
+    logvar = safe_t(logvar)
+    pred_expr = safe_t(pred_expr)
+    # 表达形状对齐
+    pred_expr, y = align_expr_shapes(pred_expr, y)
+    return x_hat, mu, logvar, pred_expr, y
+
+def call_loss_with_components(out, x, y):
+    # 解析模型输出 -> 组装 total_vae_loss 的6个参数
+    x_hat, mu, logvar, pred_expr, y_aligned = parse_model_out(out, x, y)
+    total, parts = total_vae_loss(x_hat, x, mu, logvar, pred_expr, y_aligned)
+    # parts 是 dict，键名可能是 'recon_loss','kl_loss','expr_loss'
+    recon = float(parts.get('recon_loss', 0.0))
+    kl    = float(parts.get('kl_loss', 0.0))
+    expr  = float(parts.get('expr_loss', 0.0))
+    return total, recon, kl, expr, pred_expr
 
 def step1_config_check(cfg_path: str):
     print("== STEP1 | 配置与路径核对 ==")
@@ -122,12 +154,12 @@ def step2_data_smoke(cfg_path: str, device: str):
     xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
     with torch.no_grad():
         out = model(xb)
-        loss, recon, kl, expr, y_pred = call_loss(out, yb, kl_beta=1e-5, device=device)
-        parts = [loss, recon, kl, expr]
-        ok = all(torch.isfinite(t) for t in parts)
+        loss, recon, kl, expr, y_pred = call_loss_with_components(out, xb, yb)
+        parts = [loss, torch.as_tensor(recon), torch.as_tensor(kl), torch.as_tensor(expr)]
+        ok = all(torch.isfinite(p if torch.is_tensor(p) else torch.as_tensor(p)) for p in parts)
         print(f"- batch: X={tuple(xb.shape)}, finite_loss={ok}, loss={float(loss):.6f}, recon={float(recon):.6f}, kl={float(kl):.6f}, expr={float(expr):.6f}")
         if not ok:
-            raise SystemExit("存在 NaN/Inf 的损失项，请检查 total_vae_loss 或输入数值。")
+            raise SystemExit("存在 NaN/Inf 的损失项，请检查模型/损失的数值稳定性。")
     return train_loader, val_loader, test_loader, in_ch, seq_len, model
 
 def step3_tiny_train(train_loader, device: str, in_ch: int, seq_len: int):
@@ -141,7 +173,7 @@ def step3_tiny_train(train_loader, device: str, in_ch: int, seq_len: int):
         xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
         opt.zero_grad(set_to_none=True)
         out = model(xb)
-        loss, recon, kl, expr, _ = call_loss(out, yb, kl_beta=1e-5, device=device)
+        loss, recon, kl, expr, _ = call_loss_with_components(out, xb, yb)
         if not torch.isfinite(loss):
             skipped += 1
             continue
@@ -162,11 +194,10 @@ def step4_metric_sanity(train_loader, device: str, in_ch: int, seq_len: int):
                 break
             xb, yb = safe_t(xb).to(device), safe_t(yb).to(device)
             out = model(xb)
-            _, _, _, _, y_pred = call_loss(out, yb, kl_beta=1e-5, device=device)
-            if y_pred is None:
-                continue
-            yp = safe_t(y_pred).detach().cpu().numpy().ravel()
-            yt = safe_t(yb).detach().cpu().numpy().ravel()
+            # 直接解析 pred_expr，对齐 y
+            _, _, _, pred_expr, y_aligned = parse_model_out(out, xb, yb)
+            yp = safe_t(pred_expr).detach().cpu().numpy().ravel()
+            yt = safe_t(y_aligned).detach().cpu().numpy().ravel()
             yt_all.append(yt); yp_all.append(yp)
     if yt_all and yp_all:
         yt = np.concatenate(yt_all); yp = np.concatenate(yp_all)
