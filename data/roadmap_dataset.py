@@ -336,7 +336,7 @@ def create_dataloaders(config):
         top_k=cfg["sequence"]["top_k"],
         stats_json=cfg["paths"]["stats_json"],
         min_expr_threshold=0.0,
-        zscore_per_eid=False
+        zscore_per_eid=True
     )
     N = len(ds)
     if N == 0:

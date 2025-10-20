@@ -34,8 +34,8 @@ def total_vae_loss(x_hat, x, mu, logvar, pred_expr, y,
 
     # 读取默认权重
     default_recon_w = 1.0
-    default_kl_w    = 1e-5  # 与配置保持一致
-    default_expr_w  = 15.0
+    default_kl_w    = 1e-4  # Increased from 1e-5
+    default_expr_w  = 5.0   # Decreased from 15.0
 
     rw = default_recon_w if recon_weight is None else recon_weight
     kw = default_kl_w    if kl_weight    is None else kl_weight
