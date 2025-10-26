@@ -1,5 +1,6 @@
 # train/losses.py
 
+import warnings
 import torch
 import torch.nn.functional as F
 
@@ -7,43 +8,87 @@ def mse_reconstruction_loss(x_hat, x):
     """
     输入和重建的组蛋白信号之间的MSE损失
     """
-    return F.mse_loss(x_hat, x)
+    x_hat = torch.nan_to_num(x_hat, nan=0.0, posinf=0.0, neginf=0.0)
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return F.mse_loss(x_hat, x, reduction='mean')
 
 def kl_divergence_loss(mu, logvar):
     """
     计算变分自编码器中的KL散度项
     KL(N(μ,σ²) || N(0,1)) = -0.5 * Σ(1 + logσ² - μ² - σ²)
     """
-    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
-    return kl.mean()
+    mu = torch.nan_to_num(mu, nan=0.0, posinf=0.0, neginf=0.0)
+    logvar = torch.nan_to_num(logvar, nan=0.0, posinf=0.0, neginf=0.0)
+    mu = mu.view(mu.shape[0], -1)
+    logvar = logvar.view(logvar.shape[0], -1)
+    if mu.shape[1] != logvar.shape[1]:
+        d = min(mu.shape[1], logvar.shape[1])
+        warnings.warn(f"KL: mu/logvar dim mismatch {mu.shape[1]} vs {logvar.shape[1]} -> truncate to {d}")
+        mu = mu[:, :d]
+        logvar = logvar[:, :d]
+    kl = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+    kl = kl.sum(dim=-1).mean()
+    return kl
 
-def expression_prediction_loss(pred_expr, true_expr):
+def _align_flat(a: torch.Tensor):
+    if a.dim() == 1:
+        return a.view(a.shape[0], 1)
+    if a.dim() > 2:
+        return a.view(a.shape[0], -1)
+    return a
+
+def _batch_zscore(a: torch.Tensor, eps=1e-6):
+    # 对 batch 维做标准化，消除尺度差异
+    mean = a.mean(dim=0, keepdim=True)
+    std = a.std(dim=0, unbiased=False, keepdim=True).clamp_min(eps)
+    return (a - mean) / std
+
+def _corr_loss(pred, target, eps=1e-6):
+    # Pearson 相关损失：1 - mean_corr（按列取平均）
+    px = pred - pred.mean(dim=0, keepdim=True)
+    py = target - target.mean(dim=0, keepdim=True)
+    px = px / px.norm(dim=0, keepdim=True).clamp_min(eps)
+    py = py / py.norm(dim=0, keepdim=True).clamp_min(eps)
+    r = (px * py).sum(dim=0).mean()  # 平均到标量
+    return 1.0 - r
+
+def expression_prediction_loss(pred_expr, true_expr, alpha=0.5):
     """
-    基因表达预测误差 (MSE)
+    表达项 = alpha * MSE(批内zscore后的值) + (1-alpha) * 相关损失
+    这样对尺度不敏感，更关注相关性，同时保持数值稳定
     """
-    return F.mse_loss(pred_expr.squeeze(), true_expr.squeeze())
+    pred_expr = torch.nan_to_num(pred_expr, nan=0.0, posinf=0.0, neginf=0.0)
+    true_expr = torch.nan_to_num(true_expr, nan=0.0, posinf=0.0, neginf=0.0)
+    pred_expr = _align_flat(pred_expr)
+    true_expr = _align_flat(true_expr)
+    # 对齐列数
+    if pred_expr.shape[1] != true_expr.shape[1]:
+        d = min(pred_expr.shape[1], true_expr.shape[1])
+        pred_expr = pred_expr[:, :d]
+        true_expr = true_expr[:, :d]
+    # 批内标准化 + MSE
+    pred_z = _batch_zscore(pred_expr)
+    true_z = _batch_zscore(true_expr)
+    mse = F.mse_loss(pred_z, true_z, reduction='mean')
+    # 相关损失
+    corr = _corr_loss(pred_expr, true_expr)
+    return alpha * mse + (1.0 - alpha) * corr
 
 def total_vae_loss(x_hat, x, mu, logvar, pred_expr, y,
                    recon_weight=None, kl_weight=None, expr_weight=None):
     """
     支持在训练时传入动态的权重（不传则使用模块内默认值）
     """
-    recon_loss = mse_reconstruction_loss(x_hat, x)
-    kl = kl_divergence_loss(mu, logvar)
-    expr_loss = expression_prediction_loss(pred_expr, y)
+    # 可通过环境变量覆盖权重，默认弱化重构、强调表达
+    rw = float(os.getenv('RECON_W', '0.05')) if recon_weight is None else float(recon_weight)
+    kw = float(os.getenv('KL_W',    '1.0'))  if kl_weight    is None else float(kl_weight)
+    ew = float(os.getenv('EXPR_W',  '1.0'))  if expr_weight  is None else float(expr_weight)
 
-    # 读取默认权重
-    default_recon_w = 1.0
-    default_kl_w    = 1e-4  # Increased from 1e-5
-    default_expr_w  = 5.0   # Decreased from 15.0
+    recon = mse_reconstruction_loss(x_hat, x)
+    kl    = kl_divergence_loss(mu, logvar)
+    expr  = expression_prediction_loss(pred_expr, y, alpha=0.5)
 
-    rw = default_recon_w if recon_weight is None else recon_weight
-    kw = default_kl_w    if kl_weight    is None else kl_weight
-    ew = default_expr_w  if expr_weight  is None else expr_weight
-
-    total = rw * recon_loss + kw * kl + ew * expr_loss
-    return total, {
-        'recon_loss': float(rw * recon_loss),
-        'kl_loss':    float(kw * kl),
-        'expr_loss':  float(ew * expr_loss)
-    }
+    total = rw * recon + kw * kl + ew * expr
+    return total, {'recon_loss': float(recon.detach().cpu()),
+                   'kl_loss': float(kl.detach().cpu()),
+                   'expr_loss': float(expr.detach().cpu())}
