@@ -205,48 +205,36 @@ class VAETrainer:
                 kl_sum / n_batches,
                 expr_sum / n_batches)
 
-    def fit(self, train_loader, val_loader, num_epochs=50, save_path="best_model.pt",
-            patience=5, kl_beta_max=1e-5, kl_warmup_epochs=50):
-        best_val_loss = float('inf')
-        patience_counter = 0
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=3, verbose=True
-        )
+    def fit(self, train_loader, val_loader, num_epochs, save_path, patience=10,
+            kl_beta_max=1e-4, kl_warmup_epochs=10, verbose=True, monitor='r'):
+        """
+        monitor: 'r' 用验证集 Pearson R 作为改进标准；'loss' 用验证集损失
+        """
+        best_metric = -float('inf') if monitor == 'r' else float('inf')
+        wait = 0
 
-        for epoch in range(num_epochs):
-            # 线性退火：从0逐步升到 kl_beta_max
-            warmup_ratio = min(1.0, (epoch + 1) / max(1, kl_warmup_epochs))
-            kl_beta = kl_beta_max * warmup_ratio
-
-            # 训练/验证时传入当期 kl_beta
+        for epoch in range(1, num_epochs + 1):
+            kl_beta = min(kl_beta_max, kl_beta_max * epoch / max(1, kl_warmup_epochs))
             train_loss, train_r, train_recon, train_kl, train_expr = self.train_epoch(train_loader, kl_beta=kl_beta)
             val_loss, val_r, val_recon, val_kl, val_expr = self.validate(val_loader, kl_beta=kl_beta)
 
-            scheduler.step(val_loss)
-            print(f"(epoch {epoch+1}) KL beta: {kl_beta:.6g}")
-            # 打印结果
-            print(f"Train - Loss: {train_loss:.4f}, R: {train_r:.3f}, "
-                  f"Recon: {train_recon:.4f}, KL: {train_kl:.6f}, Expr: {train_expr:.4f}")
-            print(f"Val   - Loss: {val_loss:.4f}, R: {val_r:.3f}, "
-                  f"Recon: {val_recon:.4f}, KL: {val_kl:.6f}, Expr: {val_expr:.4f}")
+            if verbose:
+                print(f"(epoch {epoch}) KL beta: {kl_beta:.1e}")
+                print(f"Train - Loss: {train_loss:.4f}, R: {train_r:.3f}, Recon: {train_recon:.4f}, KL: {train_kl:.6f}, Expr: {train_expr:.4f}")
+                print(f"Val   - Loss: {val_loss:.4f}, R: {val_r:.3f}, Recon: {val_recon:.4f}, KL: {val_kl:.6f}, Expr: {val_expr:.4f}")
 
-            # 保存最佳模型
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                patience_counter = 0
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'train_loss': train_loss,
-                    'val_loss': val_loss,
-                    'val_r': val_r
-                }, save_path)
-                print(f"[SAVED] New best model at epoch {epoch+1}")
+            metric = val_r if monitor == 'r' else val_loss
+            is_better = (metric > best_metric) if monitor == 'r' else (metric < best_metric)
+
+            if is_better:
+                best_metric = metric
+                wait = 0
+                torch.save(self.model.state_dict() if not isinstance(self.model, torch.nn.DataParallel) else self.model.module.state_dict(), save_path)
+                print("[SAVED] New best model" + (f" (val R={val_r:.3f})" if monitor=='r' else f" (val loss={val_loss:.4f})"))
             else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"[EARLY STOP] No improvement for {patience} epochs")
+                wait += 1
+                if wait >= patience:
+                    print("[EARLY STOP] No improvement for %d epochs" % patience)
                     break
         
         print("Training completed!")

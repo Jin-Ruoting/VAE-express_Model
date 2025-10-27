@@ -53,11 +53,14 @@ def _corr_loss(pred, target, eps=1e-6):
     r = (px * py).sum(dim=0).mean()  # 平均到标量
     return 1.0 - r
 
-def expression_prediction_loss(pred_expr, true_expr, alpha=0.5):
+def expression_prediction_loss(pred_expr, true_expr, alpha=None):
     """
     表达项 = alpha * MSE(批内zscore后的值) + (1-alpha) * 相关损失
     这样对尺度不敏感，更关注相关性，同时保持数值稳定
+    alpha 可用环境变量 EXPR_ALPHA 覆盖
     """
+    if alpha is None:
+        alpha = float(os.getenv('EXPR_ALPHA', '0.3'))  # 更强调相关性
     pred_expr = torch.nan_to_num(pred_expr, nan=0.0, posinf=0.0, neginf=0.0)
     true_expr = torch.nan_to_num(true_expr, nan=0.0, posinf=0.0, neginf=0.0)
     pred_expr = _align_flat(pred_expr)
@@ -78,12 +81,12 @@ def expression_prediction_loss(pred_expr, true_expr, alpha=0.5):
 def total_vae_loss(x_hat, x, mu, logvar, pred_expr, y,
                    recon_weight=None, kl_weight=None, expr_weight=None):
     """
-    支持在训练时传入动态的权重（不传则使用模块内默认值）
+    权重可用环境变量覆盖：RECON_W / KL_W / EXPR_W
+    建议先弱化 KL 与重构
     """
-    # 可通过环境变量覆盖权重，默认弱化重构、强调表达
-    rw = float(os.getenv('RECON_W', '0.05')) if recon_weight is None else float(recon_weight)
-    kw = float(os.getenv('KL_W',    '1.0'))  if kl_weight    is None else float(kl_weight)
-    ew = float(os.getenv('EXPR_W',  '1.0'))  if expr_weight  is None else float(expr_weight)
+    rw = float(os.getenv('RECON_W', '0.01')) if recon_weight is None else float(recon_weight)
+    kw = float(os.getenv('KL_W',    '0.05')) if kl_weight    is None else float(kl_weight)
+    ew = float(os.getenv('EXPR_W',  '2.0'))  if expr_weight  is None else float(expr_weight)
 
     recon = mse_reconstruction_loss(x_hat, x)
     kl    = kl_divergence_loss(mu, logvar)
