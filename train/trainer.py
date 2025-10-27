@@ -85,6 +85,9 @@ class VAETrainer:
         1) 旧版: total_vae_loss(out, y, kl_beta=...) 或位置参数
         2) 新版: total_vae_loss(x_hat, x, mu, logvar, pred_expr, y) -> (total, dict)
         返回: (loss_tensor, recon_tensor, kl_tensor, expr_tensor, y_pred_tensor或None)
+        兼容旧/新签名。新签名时，注入权重并对 KL 做 warmup:
+        kw = base_kw * (kl_beta / kl_beta_max)
+        kl_beta_max 通过环境变量 KL_BETA_MAX（默认 1e-5）控制，需与 fit() 打印一致
         """
         # 优先尝试旧签名
         try:
@@ -97,7 +100,22 @@ class VAETrainer:
 
         # 解析为新签名
         x_hat, mu, logvar, pred_expr, y_aligned = self._parse_model_out(out, x, y)
-        total, parts = total_vae_loss(x_hat, x, mu, logvar, pred_expr, y_aligned)
+
+        # 读取权重 + KL warmup
+        rw = float(os.getenv('RECON_W', '0.01'))
+        base_kw = float(os.getenv('KL_W', '0.02'))
+        kl_beta_max = float(os.getenv('KL_BETA_MAX', '1e-5'))
+        sched = os.getenv('KL_SCHEDULE', 'linear')  # linear / none
+        if sched == 'linear' and kl_beta_max > 0:
+            kw = base_kw * max(0.0, min(1.0, kl_beta / kl_beta_max))
+        else:
+            kw = base_kw
+        ew = float(os.getenv('EXPR_W', '3.0'))
+
+        total, parts = total_vae_loss(
+            x_hat, x, mu, logvar, pred_expr, y_aligned,
+            recon_weight=rw, kl_weight=kw, expr_weight=ew
+        )
         device = total.device
         recon = torch.tensor(parts.get('recon_loss', 0.0), device=device, dtype=total.dtype)
         kl    = torch.tensor(parts.get('kl_loss', 0.0),   device=device, dtype=total.dtype)
@@ -205,6 +223,9 @@ class VAETrainer:
                 kl_sum / n_batches,
                 expr_sum / n_batches)
 
+    def _set_requires_grad(self, module, flag: bool):
+        for p in module.parameters(): p.requires_grad = flag
+
     def fit(self, train_loader, val_loader, num_epochs, save_path, patience=10,
             kl_beta_max=1e-4, kl_warmup_epochs=10, verbose=True, monitor='r'):
         """
@@ -212,8 +233,24 @@ class VAETrainer:
         """
         best_metric = -float('inf') if monitor == 'r' else float('inf')
         wait = 0
+        freeze_epochs = int(os.getenv('FREEZE_EPOCHS', '0'))
 
         for epoch in range(1, num_epochs + 1):
+            # 两阶段：前 freeze_epochs 只训练表达头
+            if freeze_epochs > 0:
+                net = self.model.module if isinstance(self.model, torch.nn.DataParallel) else self.model
+                if epoch == 1 and freeze_epochs > 0:
+                    print(f"[Freeze] Freeze encoder+decoder for {freeze_epochs} epochs, train regressor only")
+                if epoch <= freeze_epochs:
+                    self._set_requires_grad(net.encoder, False)
+                    self._set_requires_grad(net.decoder, False)
+                    self._set_requires_grad(net.regressor, True)
+                elif epoch == freeze_epochs + 1:
+                    print("[Unfreeze] Unfreeze all modules")
+                    self._set_requires_grad(net.encoder, True)
+                    self._set_requires_grad(net.decoder, True)
+                    self._set_requires_grad(net.regressor, True)
+
             kl_beta = min(kl_beta_max, kl_beta_max * epoch / max(1, kl_warmup_epochs))
             train_loss, train_r, train_recon, train_kl, train_expr = self.train_epoch(train_loader, kl_beta=kl_beta)
             val_loss, val_r, val_recon, val_kl, val_expr = self.validate(val_loader, kl_beta=kl_beta)
