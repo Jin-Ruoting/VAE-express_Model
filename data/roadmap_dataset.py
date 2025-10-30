@@ -11,13 +11,14 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class RoadmapDataset(Dataset):
+class RoadmapDataset(torch.utils.data.Dataset):
     def __init__(self, 
                  data_dir, promoters_bed, expression_tsv, genome_sizes,
                  eids, marks_core, marks_extra=None, use_extra=True,
                  promoter_bp=2000, use_enhancers=False, enhancer_map_tsv=None,
                  enhancer_bp=1000, top_k=5, stats_json=None,
-                 min_expr_threshold=0.0, zscore_per_eid=False):
+                 min_expr_threshold=0.0, zscore_per_eid=False,
+                 **kwargs):
         """
         在线从 bigWig 切片，返回 X: [C, L], y: 标量(log1p或zscore后)
         """
@@ -179,6 +180,14 @@ class RoadmapDataset(Dataset):
         if debug:
             print('[DATASET DEBUG]', json.dumps(cnt))
 
+        self.expr_scale = os.getenv('EXPR_SCALE', 'log2_rpkm_plus1').lower()
+        # 可选：从 cfg 读取
+        cfg = kwargs.get('cfg') if 'cfg' in kwargs else None
+        if cfg and isinstance(cfg, dict):
+            maybe = (cfg.get('expression', {}) or {}).get('transform')
+            if isinstance(maybe, str):
+                self.expr_scale = maybe.lower()
+
     def __len__(self):
         return len(self.samples)
 
@@ -261,6 +270,18 @@ class RoadmapDataset(Dataset):
         arr = (arr - q1) / (q99 - q1 + 1e-6)
         return arr.astype(np.float32)
 
+    def _transform_expr(self, y):
+        # y 输入为原始 RPKM/TPM
+        if self.expr_scale in ('log2', 'log2_rpkm_plus1', 'log2(x+1)', 'log2_rpkm'):
+            y = np.asarray(y, dtype=np.float32)
+            y = np.log2(y + 1.0)
+            return y
+        elif self.expr_scale in ('identity', 'none', 'raw'):
+            return np.asarray(y, dtype=np.float32)
+        else:
+            # 默认安全：按 log2 处理
+            return np.log2(np.asarray(y, dtype=np.float32) + 1.0)
+
     def __getitem__(self, idx):
         gene, eid, chrom, p_start, p_end, strand, enh_list = self.samples[idx]
         segments = []
@@ -288,8 +309,12 @@ class RoadmapDataset(Dataset):
         # 若不足K，前面构建sample时已限制K；若某bw缺失则是0通道
         X = np.stack(segments, axis=0)  # [C, L]
         # 标签 y
-        y_val = float(self.exp.at[gene, eid])
-        y = np.log1p(y_val)
+        y_raw = float(self.exp.at[gene, eid])
+        y = self._transform_expr(y_raw)
+        # 返回 y 形状统一为 [1]
+        y = np.asarray(y).reshape(-1)
+        if y.ndim == 1 and y.shape[0] == 1:
+            y = y.astype(np.float32)
         if self.zscore_per_eid:
             mu, sd = self.exp_mean.get(eid, 0.0), self.exp_std.get(eid, 1.0)
             y = (y - mu) / sd

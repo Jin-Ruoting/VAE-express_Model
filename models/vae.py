@@ -111,7 +111,7 @@ class Decoder(nn.Module):
 
 
 class ExpressionRegressor(nn.Module):
-    def __init__(self, latent_dim=64, hidden_dims=(256, 128, 64), p_drop=0.5):
+    def __init__(self, latent_dim=64, hidden_dims=(256, 128, 64), p_drop=0.5, nonneg=False):
         super().__init__()
         layers = []
         in_dim = latent_dim
@@ -119,10 +119,13 @@ class ExpressionRegressor(nn.Module):
             layers += [nn.Linear(in_dim, h), nn.ReLU(), nn.LayerNorm(h), nn.Dropout(p_drop)]
             in_dim = h
         layers += [nn.Linear(in_dim, 1)]
-        self.regressor = nn.Sequential(*layers)
+        self.core = nn.Sequential(*layers)
+        self.nonneg = nonneg
+        self.sp = nn.Softplus(beta=1.0)  # 平滑非负
 
     def forward(self, z):
-        return self.regressor(z)  # [N, 1]
+        out = self.core(z)
+        return self.sp(out) if self.nonneg else out
 
 
 class VAE(nn.Module):
