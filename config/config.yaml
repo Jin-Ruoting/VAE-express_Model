@@ -13,10 +13,15 @@ use_extra: false
 
 eids: [E003, E004, E005, E006, E007, E016, E066, E114, E116, E118]
 
+# 表达值处理配置
+expression:
+  transform: log2_rpkm_plus1  # 表达值变换方式: log2_rpkm_plus1 / identity / raw
+  # log2_rpkm_plus1: 应用 log2(RPKM+1) 变换
+
 paths:
   genome_sizes: preprocessing/annotations/hg38.fa.sizes
   gtf: preprocessing/annotations/gencode.v49.primary_assembly.annotation.gtf.gz
   promoters_bed: preprocessing/annotations/promoters_2kb.hg38.bed
   enhancer_map: #annotations/gene_enhancer_map_ABC.tsv   # 可为空，Promoter-only时不使用
   stats_json: preprocessing/annotations/signal_stats.json             # 信号分位数/缩放统计
-  expression: exp/raw_exp.final.tsv
+  expression: exp/raw_exp.final.tsv  # 原始 RPKM 表达值文件

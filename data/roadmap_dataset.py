@@ -35,6 +35,14 @@ class RoadmapDataset(torch.utils.data.Dataset):
         self.genome_sizes = genome_sizes
         self.zscore_per_eid = zscore_per_eid
 
+        # 读取表达变换设置，提前初始化（供 zscore 统计一致使用）
+        self.expr_scale = os.getenv('EXPR_SCALE', 'log2_rpkm_plus1').lower()
+        cfg = kwargs.get('cfg') if 'cfg' in kwargs else None
+        if cfg and isinstance(cfg, dict):
+            maybe = (cfg.get('expression', {}) or {}).get('transform')
+            if isinstance(maybe, str):
+                self.expr_scale = maybe.lower()
+
         # 载入表达矩阵
         self.exp = pd.read_csv(expression_tsv, sep='\t')
         # 统一 gene_id 列名
@@ -58,7 +66,13 @@ class RoadmapDataset(torch.utils.data.Dataset):
         self.exp_std = {}
         if self.zscore_per_eid:
             for eid in self.eids:
-                v = np.log1p(self.exp[eid].values)
+                vals = self.exp[eid].values.astype(np.float32)
+                if self.expr_scale in ('log2', 'log2_rpkm_plus1', 'log2(x+1)', 'log2_rpkm'):
+                    v = np.log2(vals + 1.0)
+                elif self.expr_scale in ('identity', 'none', 'raw'):
+                    v = vals
+                else:
+                    v = np.log2(vals + 1.0)
                 self.exp_mean[eid] = float(np.mean(v))
                 self.exp_std[eid] = float(np.std(v) + 1e-6)
 
@@ -179,14 +193,6 @@ class RoadmapDataset(torch.utils.data.Dataset):
         logger.info(f"Dataset built: samples={len(self.samples)}, channels={self.input_channels}, L={self.seq_len}")
         if debug:
             print('[DATASET DEBUG]', json.dumps(cnt))
-
-        self.expr_scale = os.getenv('EXPR_SCALE', 'log2_rpkm_plus1').lower()
-        # 可选：从 cfg 读取
-        cfg = kwargs.get('cfg') if 'cfg' in kwargs else None
-        if cfg and isinstance(cfg, dict):
-            maybe = (cfg.get('expression', {}) or {}).get('transform')
-            if isinstance(maybe, str):
-                self.expr_scale = maybe.lower()
 
     def __len__(self):
         return len(self.samples)
@@ -361,7 +367,8 @@ def create_dataloaders(config):
         top_k=cfg["sequence"]["top_k"],
         stats_json=cfg["paths"]["stats_json"],
         min_expr_threshold=0.0,
-        zscore_per_eid=True
+        zscore_per_eid=False,   # 关闭 zscore，返回原始 log2(RPKM+1)
+        cfg=cfg                 # 传入以便读取 expression.transform
     )
     N = len(ds)
     if N == 0:
