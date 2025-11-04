@@ -25,9 +25,9 @@ echo "========================================"
 echo ""
 
 CUDA_VISIBLE_DEVICES=0,1 \
-NUM_WORKERS=8 \
-OMP_NUM_THREADS=8 \
-MKL_NUM_THREADS=8 \
+NUM_WORKERS=32 \
+OMP_NUM_THREADS=32 \
+MKL_NUM_THREADS=32 \
 EXPR_ALPHA=0.0 \
 EXPR_W=6.0 \
 RECON_W=0.0 \
@@ -56,9 +56,9 @@ echo "========================================"
 echo ""
 
 CUDA_VISIBLE_DEVICES=0,1 \
-NUM_WORKERS=8 \
-OMP_NUM_THREADS=8 \
-MKL_NUM_THREADS=8 \
+NUM_WORKERS=32 \
+OMP_NUM_THREADS=32 \
+MKL_NUM_THREADS=32 \
 EXPR_ALPHA=0.2 \
 EXPR_W=4.0 \
 RECON_W=0.01 \
