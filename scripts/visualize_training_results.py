@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-可视化训练曲线和结果
+Visualize training curves and results
 """
 import re
 import matplotlib.pyplot as plt
@@ -8,9 +8,9 @@ import numpy as np
 from pathlib import Path
 
 def parse_training_log(log_file='logs/train.log'):
-    """解析训练日志"""
+    """Parse training log file"""
     
-    # 尝试多个可能的日志位置
+    # Try multiple possible log locations
     possible_paths = [
         log_file,
         'logs/train.log',
@@ -24,11 +24,11 @@ def parse_training_log(log_file='logs/train.log'):
             break
     
     if not log_path:
-        print(f"✗ 找不到训练日志文件")
-        print(f"  尝试的路径: {possible_paths}")
+        print(f"Error: Training log file not found")
+        print(f"  Tried paths: {possible_paths}")
         return None
     
-    print(f"✓ 解析日志: {log_path}")
+    print(f"Parsing log: {log_path}")
     
     epochs = []
     train_loss, val_loss = [], []
@@ -83,7 +83,7 @@ def parse_training_log(log_file='logs/train.log'):
                         kl_beta.append(current_kl_beta)
     
     if not epochs:
-        print("✗ 未能从日志中提取训练数据")
+        print("Error: Failed to extract training data from log")
         return None
     
     return {
@@ -102,68 +102,68 @@ def parse_training_log(log_file='logs/train.log'):
     }
 
 def plot_training_curves(data):
-    """绘制训练曲线"""
+    """Plot training curves"""
     
     fig, axes = plt.subplots(2, 3, figsize=(15, 8))
     
     epochs = data['epochs']
     
-    # 总损失
-    axes[0, 0].plot(epochs, data['train_loss'], label='训练', linewidth=2)
-    axes[0, 0].plot(epochs, data['val_loss'], label='验证', linewidth=2)
+    # Total loss
+    axes[0, 0].plot(epochs, data['train_loss'], label='Train', linewidth=2)
+    axes[0, 0].plot(epochs, data['val_loss'], label='Validation', linewidth=2)
     axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('总损失')
-    axes[0, 0].set_title('总损失')
+    axes[0, 0].set_ylabel('Total Loss')
+    axes[0, 0].set_title('Total Loss')
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     
     # Pearson R
-    axes[0, 1].plot(epochs, data['train_r'], label='训练', linewidth=2)
-    axes[0, 1].plot(epochs, data['val_r'], label='验证', linewidth=2)
+    axes[0, 1].plot(epochs, data['train_r'], label='Train', linewidth=2)
+    axes[0, 1].plot(epochs, data['val_r'], label='Validation', linewidth=2)
     axes[0, 1].set_xlabel('Epoch')
     axes[0, 1].set_ylabel('Pearson R')
-    axes[0, 1].set_title('表达预测相关性')
+    axes[0, 1].set_title('Expression Prediction Correlation')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     axes[0, 1].set_ylim(0, 1)
     
-    # 找出最佳epoch
+    # Mark best epoch
     best_idx = np.argmax(data['val_r'])
     best_epoch = epochs[best_idx]
     axes[0, 1].axvline(x=best_epoch, color='red', linestyle='--', 
-                       linewidth=2, label=f'最佳 (epoch {best_epoch})')
+                       linewidth=2, label=f'Best (epoch {best_epoch})')
     axes[0, 1].legend()
     
-    # 表达损失
-    axes[0, 2].plot(epochs, data['train_expr'], label='训练', linewidth=2)
-    axes[0, 2].plot(epochs, data['val_expr'], label='验证', linewidth=2)
+    # Expression loss
+    axes[0, 2].plot(epochs, data['train_expr'], label='Train', linewidth=2)
+    axes[0, 2].plot(epochs, data['val_expr'], label='Validation', linewidth=2)
     axes[0, 2].set_xlabel('Epoch')
-    axes[0, 2].set_ylabel('表达损失')
-    axes[0, 2].set_title('表达预测损失')
+    axes[0, 2].set_ylabel('Expression Loss')
+    axes[0, 2].set_title('Expression Prediction Loss')
     axes[0, 2].legend()
     axes[0, 2].grid(True, alpha=0.3)
     
-    # 重构损失
-    axes[1, 0].plot(epochs, data['train_recon'], label='训练', linewidth=2)
-    axes[1, 0].plot(epochs, data['val_recon'], label='验证', linewidth=2)
+    # Reconstruction loss
+    axes[1, 0].plot(epochs, data['train_recon'], label='Train', linewidth=2)
+    axes[1, 0].plot(epochs, data['val_recon'], label='Validation', linewidth=2)
     axes[1, 0].set_xlabel('Epoch')
-    axes[1, 0].set_ylabel('重构损失')
-    axes[1, 0].set_title('重构损失')
+    axes[1, 0].set_ylabel('Reconstruction Loss')
+    axes[1, 0].set_title('Reconstruction Loss')
     axes[1, 0].legend()
     axes[1, 0].grid(True, alpha=0.3)
     
-    # KL 损失和 beta
+    # KL divergence and beta
     ax_kl = axes[1, 1]
-    ax_kl.plot(epochs, data['train_kl'], label='训练KL', linewidth=2)
-    ax_kl.plot(epochs, data['val_kl'], label='验证KL', linewidth=2)
+    ax_kl.plot(epochs, data['train_kl'], label='Train KL', linewidth=2)
+    ax_kl.plot(epochs, data['val_kl'], label='Val KL', linewidth=2)
     ax_kl.set_xlabel('Epoch')
-    ax_kl.set_ylabel('KL 散度', color='tab:blue')
-    ax_kl.set_title('KL 散度与 Beta')
+    ax_kl.set_ylabel('KL Divergence', color='tab:blue')
+    ax_kl.set_title('KL Divergence and Beta')
     ax_kl.tick_params(axis='y', labelcolor='tab:blue')
     ax_kl.legend(loc='upper left')
     ax_kl.grid(True, alpha=0.3)
     
-    # 添加 KL beta 曲线
+    # Add KL beta curve
     if len(data['kl_beta']) == len(epochs):
         ax_beta = ax_kl.twinx()
         ax_beta.plot(epochs, data['kl_beta'], 'r--', 
@@ -172,27 +172,27 @@ def plot_training_curves(data):
         ax_beta.tick_params(axis='y', labelcolor='tab:red')
         ax_beta.legend(loc='upper right')
     
-    # 最佳性能总结
+    # Training summary
     axes[1, 2].axis('off')
     best_r = data['val_r'][best_idx]
     summary_text = f"""
-训练总结
+Training Summary
 
-最佳Epoch: {best_epoch}
-最佳验证R: {best_r:.4f}
+Best Epoch: {best_epoch}
+Best Val R: {best_r:.4f}
 
-最终性能 (Epoch {epochs[-1]}):
-  训练R: {data['train_r'][-1]:.4f}
-  验证R: {data['val_r'][-1]:.4f}
+Final Performance (Epoch {epochs[-1]}):
+  Train R: {data['train_r'][-1]:.4f}
+  Val R:   {data['val_r'][-1]:.4f}
   
-  训练损失: {data['train_loss'][-1]:.4f}
-  验证损失: {data['val_loss'][-1]:.4f}
+  Train Loss: {data['train_loss'][-1]:.4f}
+  Val Loss:   {data['val_loss'][-1]:.4f}
   
-  表达损失: {data['val_expr'][-1]:.4f}
-  重构损失: {data['val_recon'][-1]:.4f}
-  KL散度: {data['val_kl'][-1]:.4f}
+  Expr Loss:   {data['val_expr'][-1]:.4f}
+  Recon Loss:  {data['val_recon'][-1]:.4f}
+  KL Div:      {data['val_kl'][-1]:.4f}
   
-总Epoch数: {len(epochs)}
+Total Epochs: {len(epochs)}
     """
     axes[1, 2].text(0.1, 0.5, summary_text, 
                     fontsize=11, family='monospace',
@@ -201,36 +201,36 @@ def plot_training_curves(data):
     
     plt.tight_layout()
     
-    # 确保目录存在
+    # Ensure directory exists
     Path('results/plots').mkdir(parents=True, exist_ok=True)
     plt.savefig('results/plots/training_curves.png', dpi=300, bbox_inches='tight')
-    print("✓ 训练曲线已保存: results/plots/training_curves.png")
+    print("Training curves saved: results/plots/training_curves.png")
 
 def main():
     print("="*60)
-    print("  可视化训练结果")
+    print("  Visualize Training Results")
     print("="*60)
     
-    print("\n解析训练日志...")
+    print("\nParsing training log...")
     data = parse_training_log()
     
     if data:
-        print(f"✓ 解析完成: {len(data['epochs'])} 个epoch")
-        print(f"  Epoch 范围: {data['epochs'][0]} - {data['epochs'][-1]}")
-        print(f"  最佳验证R: {max(data['val_r']):.4f}")
-        print(f"  最终验证R: {data['val_r'][-1]:.4f}")
+        print(f"Parsing complete: {len(data['epochs'])} epochs")
+        print(f"  Epoch range: {data['epochs'][0]} - {data['epochs'][-1]}")
+        print(f"  Best val R: {max(data['val_r']):.4f}")
+        print(f"  Final val R: {data['val_r'][-1]:.4f}")
         
-        print("\n绘制训练曲线...")
+        print("\nPlotting training curves...")
         plot_training_curves(data)
         
         print("\n" + "="*60)
-        print("  完成！")
+        print("  Complete")
         print("="*60)
     else:
-        print("\n✗ 日志解析失败")
-        print("\n请确保:")
-        print("  1. 训练日志文件存在")
-        print("  2. 日志格式正确")
+        print("\nError: Log parsing failed")
+        print("\nPlease ensure:")
+        print("  1. Training log file exists")
+        print("  2. Log format is correct")
 
 if __name__ == '__main__':
     main()

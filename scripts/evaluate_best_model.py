@@ -21,22 +21,22 @@ from data.roadmap_dataset import create_dataloaders
 import yaml
 
 def evaluate_model():
-    """评估模型在测试集上的性能"""
+    """Evaluate model performance on test set"""
     
     print("="*60)
-    print("  VAE 模型全面评估")
+    print("  VAE Model Evaluation")
     print("="*60)
     
-    # 1. 加载配置
+    # 1. Load configuration
     cfg = yaml.safe_load(open('config/config.yaml'))
     
-    # 2. 创建数据加载器
-    print("\n[1/5] 加载数据...")
+    # 2. Create data loaders
+    print("\n[1/5] Loading data...")
     _, _, test_loader = create_dataloaders('config/config.yaml')
-    print(f"✓ 测试集批次数: {len(test_loader)}")
+    print(f"Test batches: {len(test_loader)}")
     
-    # 3. 加载模型
-    print("\n[2/5] 加载模型...")
+    # 3. Load model
+    print("\n[2/5] Loading model...")
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     marks = cfg['marks']['core'] + (cfg['marks']['extra'] if cfg.get('use_extra') else [])
@@ -48,15 +48,15 @@ def evaluate_model():
         sequence_length=seq_len
     )
     
-    # 加载最佳模型权重
+    # Load best model weights
     model_path = 'results/models/vae_promoter_only_best.pt'
     if not Path(model_path).exists():
-        print(f"✗ 模型文件不存在: {model_path}")
+        print(f"Error: Model file not found: {model_path}")
         return
     
     state_dict = torch.load(model_path, map_location=device, weights_only=False)
     
-    # 修复键名不匹配：regressor.regressor.* -> regressor.core.*
+    # Fix key mismatch: regressor.regressor.* -> regressor.core.*
     new_state_dict = {}
     for key, value in state_dict.items():
         if 'regressor.regressor.' in key:
@@ -68,10 +68,10 @@ def evaluate_model():
     model.load_state_dict(new_state_dict)
     model = model.to(device)
     model.eval()
-    print(f"✓ 模型已加载: {model_path}")
+    print(f"Model loaded: {model_path}")
     
-    # 4. 运行预测
-    print("\n[3/5] 运行预测...")
+    # 4. Run prediction
+    print("\n[3/5] Running predictions...")
     
     all_true = []
     all_pred = []
@@ -79,7 +79,7 @@ def evaluate_model():
     all_logvar = []
     
     with torch.no_grad():
-        for x, y in tqdm(test_loader, desc="预测进度"):
+        for x, y in tqdm(test_loader, desc="Prediction"):
             x = x.to(device)
             y = y.to(device)
             
@@ -90,18 +90,18 @@ def evaluate_model():
             all_mu.append(mu.cpu().numpy())
             all_logvar.append(logvar.cpu().numpy())
     
-    # 合并结果
+    # Concatenate results
     y_true = np.concatenate(all_true, axis=0).reshape(-1)
     y_pred = np.concatenate(all_pred, axis=0).reshape(-1)
     mu = np.concatenate(all_mu, axis=0)
     logvar = np.concatenate(all_logvar, axis=0)
     
-    print(f"✓ 完成预测: {len(y_true)} 个样本")
+    print(f"Predictions completed: {len(y_true)} samples")
     
-    # 5. 计算指标
-    print("\n[4/5] 计算评估指标...")
+    # 5. Calculate metrics
+    print("\n[4/5] Computing evaluation metrics...")
     
-    # 过滤无效值
+    # Filter invalid values
     valid = np.isfinite(y_true) & np.isfinite(y_pred)
     y_true_valid = y_true[valid]
     y_pred_valid = y_pred[valid]
@@ -117,81 +117,81 @@ def evaluate_model():
         'n_invalid': int(len(y_true) - len(y_true_valid))
     }
     
-    # 打印结果
+    # Print results
     print("\n" + "="*60)
-    print("  测试集性能")
+    print("  Test Set Performance")
     print("="*60)
-    print(f"Pearson R:    {metrics['pearson_r']:.4f}")
-    print(f"Spearman R:   {metrics['spearman_r']:.4f}")
-    print(f"R² Score:     {metrics['r2_score']:.4f}")
-    print(f"MSE:          {metrics['mse']:.4f}")
-    print(f"RMSE:         {metrics['rmse']:.4f}")
-    print(f"MAE:          {metrics['mae']:.4f}")
-    print(f"样本数:       {metrics['n_samples']}")
+    print(f"Pearson R:       {metrics['pearson_r']:.4f}")
+    print(f"Spearman R:      {metrics['spearman_r']:.4f}")
+    print(f"R² Score:        {metrics['r2_score']:.4f}")
+    print(f"MSE:             {metrics['mse']:.4f}")
+    print(f"RMSE:            {metrics['rmse']:.4f}")
+    print(f"MAE:             {metrics['mae']:.4f}")
+    print(f"Sample count:    {metrics['n_samples']}")
     if metrics['n_invalid'] > 0:
-        print(f"无效样本:     {metrics['n_invalid']}")
+        print(f"Invalid samples: {metrics['n_invalid']}")
     print("="*60)
     
-    # 6. 保存结果
-    print("\n[5/5] 保存结果...")
+    # 6. Save results
+    print("\n[5/5] Saving results...")
     
-    # 确保目录存在
+    # Ensure directories exist
     Path('results/plots').mkdir(parents=True, exist_ok=True)
     
-    # 保存指标
+    # Save metrics
     import json
     with open('results/test_metrics.json', 'w') as f:
         json.dump(metrics, f, indent=2)
-    print("✓ 指标已保存: results/test_metrics.json")
+    print("Metrics saved: results/test_metrics.json")
     
-    # 保存预测结果
+    # Save predictions
     results_df = pd.DataFrame({
         'true_expr': y_true_valid,
         'pred_expr': y_pred_valid
     })
     results_df.to_csv('results/test_predictions.csv', index=False)
-    print("✓ 预测已保存: results/test_predictions.csv")
+    print("Predictions saved: results/test_predictions.csv")
     
-    # 保存潜在表示
+    # Save latent representations
     np.savez('results/test_latent.npz', 
              mu=mu, logvar=logvar)
-    print("✓ 潜在表示已保存: results/test_latent.npz")
+    print("Latent representations saved: results/test_latent.npz")
     
-    # 7. 生成可视化
-    print("\n生成可视化...")
+    # 7. Generate visualizations
+    print("\nGenerating visualizations...")
     
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     
-    # 散点图
+    # Scatter plot
     axes[0, 0].scatter(y_true_valid, y_pred_valid, alpha=0.3, s=1)
     axes[0, 0].plot([y_true_valid.min(), y_true_valid.max()], 
                     [y_true_valid.min(), y_true_valid.max()], 
                     'r--', lw=2)
-    axes[0, 0].set_xlabel('真实表达 (log2(RPKM+1))')
-    axes[0, 0].set_ylabel('预测表达 (log2(RPKM+1))')
-    axes[0, 0].set_title(f'预测 vs 真实 (R={metrics["pearson_r"]:.3f})')
+    axes[0, 0].set_xlabel('True Expression (log2(RPKM+1))')
+    axes[0, 0].set_ylabel('Predicted Expression (log2(RPKM+1))')
+    axes[0, 0].set_title(f'Prediction vs. Ground Truth (R={metrics["pearson_r"]:.3f})')
     axes[0, 0].grid(True, alpha=0.3)
     
-    # 残差图
+    # Residual plot
     residuals = y_pred_valid - y_true_valid
     axes[0, 1].scatter(y_true_valid, residuals, alpha=0.3, s=1)
     axes[0, 1].axhline(y=0, color='r', linestyle='--', lw=2)
-    axes[0, 1].set_xlabel('真实表达 (log2(RPKM+1))')
-    axes[0, 1].set_ylabel('残差 (预测 - 真实)')
-    axes[0, 1].set_title('残差分析')
+    axes[0, 1].set_xlabel('True Expression (log2(RPKM+1))')
+    axes[0, 1].set_ylabel('Residuals (Predicted - True)')
+    axes[0, 1].set_title('Residual Analysis')
     axes[0, 1].grid(True, alpha=0.3)
     
-    # 误差分布
+    # Residual distribution
     axes[1, 0].hist(residuals, bins=50, edgecolor='black', alpha=0.7)
     axes[1, 0].axvline(x=0, color='r', linestyle='--', lw=2)
-    axes[1, 0].set_xlabel('残差')
-    axes[1, 0].set_ylabel('频数')
-    axes[1, 0].set_title(f'残差分布 (μ={residuals.mean():.3f}, σ={residuals.std():.3f})')
+    axes[1, 0].set_xlabel('Residuals')
+    axes[1, 0].set_ylabel('Frequency')
+    axes[1, 0].set_title(f'Residual Distribution (μ={residuals.mean():.3f}, σ={residuals.std():.3f})')
     axes[1, 0].grid(True, alpha=0.3)
     
-    # 按表达水平的性能
+    # Performance by expression level
     bins = [0, 3, 7, 12, np.inf]
-    labels = ['低\n(0-3)', '中\n(3-7)', '高\n(7-12)', '极高\n(>12)']
+    labels = ['Low\n(0-3)', 'Medium\n(3-7)', 'High\n(7-12)', 'Very High\n(>12)']
     results_df['level'] = pd.cut(results_df['true_expr'], bins=bins, labels=labels)
     
     level_metrics = []
@@ -204,20 +204,20 @@ def evaluate_model():
             level_metrics.append(0)
     
     axes[1, 1].bar(labels, level_metrics, edgecolor='black', alpha=0.7)
-    axes[1, 1].set_xlabel('表达水平')
+    axes[1, 1].set_xlabel('Expression Level')
     axes[1, 1].set_ylabel('Pearson R')
-    axes[1, 1].set_title('不同表达水平的性能')
+    axes[1, 1].set_title('Performance by Expression Level')
     axes[1, 1].grid(True, alpha=0.3, axis='y')
     axes[1, 1].set_ylim(0, 1)
     
     plt.tight_layout()
     plt.savefig('results/plots/evaluation_report.png', dpi=300, bbox_inches='tight')
-    print("✓ 可视化已保存: results/plots/evaluation_report.png")
+    print("Visualization saved: results/plots/evaluation_report.png")
     
     print("\n" + "="*60)
-    print("  评估完成！")
+    print("  Evaluation Complete")
     print("="*60)
-    print("\n生成的文件:")
+    print("\nGenerated files:")
     print("  - results/test_metrics.json")
     print("  - results/test_predictions.csv")
     print("  - results/test_latent.npz")
