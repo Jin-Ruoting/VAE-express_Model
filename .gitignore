@@ -194,4 +194,4 @@ cython_debug/
 .cursorindexingignore
 
 .idea/
-.md
+docs/
