@@ -54,8 +54,18 @@ def evaluate_model():
         print(f"✗ 模型文件不存在: {model_path}")
         return
     
-    state_dict = torch.load(model_path, map_location=device)
-    model.load_state_dict(state_dict)
+    state_dict = torch.load(model_path, map_location=device, weights_only=False)
+    
+    # 修复键名不匹配：regressor.regressor.* -> regressor.core.*
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        if 'regressor.regressor.' in key:
+            new_key = key.replace('regressor.regressor.', 'regressor.core.')
+            new_state_dict[new_key] = value
+        else:
+            new_state_dict[key] = value
+    
+    model.load_state_dict(new_state_dict)
     model = model.to(device)
     model.eval()
     print(f"✓ 模型已加载: {model_path}")
