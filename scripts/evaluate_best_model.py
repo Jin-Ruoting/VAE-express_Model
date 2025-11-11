@@ -20,6 +20,9 @@ from models.vae import VAE
 from data.roadmap_dataset import create_dataloaders
 import yaml
 
+EXPR_MEAN = 2.3276
+EXPR_STD = 2.1382
+
 def evaluate_model():
     """Evaluate model performance on test set"""
     
@@ -84,6 +87,9 @@ def evaluate_model():
             y = y.to(device)
             
             x_hat, mu, logvar, expr_pred = model(x)
+            
+            # Denormalize predictions from z-score to log2(RPKM+1)
+            expr_pred = expr_pred * EXPR_STD + EXPR_MEAN
             
             all_true.append(y.cpu().numpy())
             all_pred.append(expr_pred.cpu().numpy())
