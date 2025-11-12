@@ -31,11 +31,11 @@ def verify_log2_transform():
     print("\n[2] 创建数据加载器...")
     try:
         train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')
-        print(f"    ✓ 训练集批次数: {len(train_loader)}")
-        print(f"    ✓ 验证集批次数: {len(val_loader)}")
-        print(f"    ✓ 测试集批次数: {len(test_loader)}")
+        print(f"    训练集批次数: {len(train_loader)}")
+        print(f"    验证集批次数: {len(val_loader)}")
+        print(f"    测试集批次数: {len(test_loader)}")
     except Exception as e:
-        print(f"    ✗ 数据加载器创建失败: {e}")
+        print(f"    数据加载器创建失败: {e}")
         return False
     
     # 3. 采样一批数据进行检查
@@ -90,9 +90,9 @@ def verify_log2_transform():
         # 6. 输出验证结果
         print("\n" + "=" * 70)
         if is_valid:
-            print("✓✓✓ 验证通过！数据标签已正确应用 log2(RPKM+1) 变换 ✓✓✓")
+            print("验证通过！数据标签已正确应用 log2(RPKM+1) 变换")
         else:
-            print("✗✗✗ 验证失败！可能存在以下问题：")
+            print("验证失败！可能存在以下问题：")
             for reason in reasons:
                 print(f"    - {reason}")
         print("=" * 70)
@@ -100,7 +100,7 @@ def verify_log2_transform():
         return is_valid
         
     except Exception as e:
-        print(f"    ✗ 数据采样失败: {e}")
+        print(f"    数据采样失败: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -151,12 +151,12 @@ def main():
     print("总结")
     print("=" * 70)
     if data_valid:
-        print("✓ 数据集标签已正确应用 log2(RPKM+1) 变换")
-        print("✓ 模型架构正常，可以在 log2 空间预测表达值")
+        print("数据集标签已正确应用 log2(RPKM+1) 变换")
+        print("模型架构正常，可以在 log2 空间预测表达值")
         print("\n您的实现是正确的！")
         print("训练时，模型将在 log2(RPKM+1) 空间学习和预测。")
     else:
-        print("✗ 发现潜在问题，请检查上述错误信息")
+        print("发现潜在问题，请检查上述错误信息")
     print("=" * 70)
     
     return data_valid

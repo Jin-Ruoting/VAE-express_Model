@@ -39,16 +39,16 @@ def check_transform_function():
         for rpkm, expected_log2 in test_cases:
             result = float(ds._transform_expr(rpkm))
             if abs(result - expected_log2) < 0.01:
-                status = "✓"
+                status = "[OK]"
             else:
-                status = "✗"
+                status = "[FAIL]"
                 all_pass = False
             print(f"  {status} RPKM={rpkm:3d} → log2({rpkm}+1)={result:.2f} (期望≈{expected_log2})")
         
         return all_pass
         
     except Exception as e:
-        print(f"  ✗ 检查失败: {e}")
+        print(f"  检查失败: {e}")
         return False
 
 def check_model_output():
@@ -68,14 +68,14 @@ def check_model_output():
         
         # 检查输出形状
         if expr_pred.shape == torch.Size([2, 1]):
-            print(f"  ✓ 模型输出形状正确: {expr_pred.shape}")
+            print(f"  模型输出形状正确: {expr_pred.shape}")
             return True
         else:
-            print(f"  ✗ 模型输出形状错误: {expr_pred.shape}，期望 [2, 1]")
+            print(f"  模型输出形状错误: {expr_pred.shape}，期望 [2, 1]")
             return False
             
     except Exception as e:
-        print(f"  ✗ 检查失败: {e}")
+        print(f"  检查失败: {e}")
         return False
 
 def check_config():
@@ -89,17 +89,17 @@ def check_config():
         transform = cfg.get('expression', {}).get('transform', 'NOT_SET')
         
         if transform == 'log2_rpkm_plus1':
-            print(f"  ✓ 配置正确: expression.transform = '{transform}'")
+            print(f"  配置正确: expression.transform = '{transform}'")
             return True
         elif transform == 'NOT_SET':
-            print(f"  ⚠ 未设置，使用默认值 'log2_rpkm_plus1'")
+            print(f"  未设置，使用默认值 'log2_rpkm_plus1'")
             return True
         else:
-            print(f"  ⚠ 配置为: '{transform}'（非标准值）")
+            print(f"  配置为: '{transform}'（非标准值）")
             return True
             
     except Exception as e:
-        print(f"  ✗ 配置检查失败: {e}")
+        print(f"  配置检查失败: {e}")
         return False
 
 def main():
@@ -124,16 +124,16 @@ def main():
     # 总结
     print("\n" + "="*60)
     if all(checks):
-        print("  ✓✓✓ 所有检查通过！实现正确！")
+        print("  所有检查通过！实现正确！")
         print("\n  您的代码已正确实现 log2(RPKM+1) 变换。")
         print("  - 数据标签在加载时自动变换")
         print("  - 模型在 log2 空间训练和预测")
         print("  - 无需进行任何修复")
     else:
-        print("  ⚠ 部分检查未通过，请查看上述详情")
+        print("  部分检查未通过，请查看上述详情")
     print("="*60 + "\n")
     
-    print("💡 提示:")
+    print("提示:")
     print("  - 运行完整验证: python scripts/verify_log2_transform.py")
     print("  - 查看详细文档: docs/LOG2_TRANSFORM_EXPLANATION.md")
     print()

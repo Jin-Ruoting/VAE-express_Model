@@ -55,27 +55,43 @@ def _corr_loss(pred, target, eps=1e-6):
 
 def expression_prediction_loss(pred_expr, true_expr, alpha=None):
     """
-    表达项 = alpha * MSE(批内zscore后的值) + (1-alpha) * 相关损失
-    这样对尺度不敏感，更关注相关性，同时保持数值稳定
-    alpha 可用环境变量 EXPR_ALPHA 覆盖
+    表达项 = alpha * MSE + (1-alpha) * 相关损失
+    
+    可通过环境变量控制：
+    - EXPR_ALPHA: MSE 权重 (默认 0.3)
+    - EXPR_LOSS_MODE: 'zscore' 或 'raw' (默认 'zscore')
+      - 'zscore': MSE 在批内标准化后的值上计算（关注相关性）
+      - 'raw': MSE 在原始值上计算（关注绝对值准确性）
     """
     if alpha is None:
-        alpha = float(os.getenv('EXPR_ALPHA', '0.3'))  # 更强调相关性
+        alpha = float(os.getenv('EXPR_ALPHA', '0.3'))
+    
+    loss_mode = os.getenv('EXPR_LOSS_MODE', 'zscore').lower()
+    
     pred_expr = torch.nan_to_num(pred_expr, nan=0.0, posinf=0.0, neginf=0.0)
     true_expr = torch.nan_to_num(true_expr, nan=0.0, posinf=0.0, neginf=0.0)
     pred_expr = _align_flat(pred_expr)
     true_expr = _align_flat(true_expr)
+    
     # 对齐列数
     if pred_expr.shape[1] != true_expr.shape[1]:
         d = min(pred_expr.shape[1], true_expr.shape[1])
         pred_expr = pred_expr[:, :d]
         true_expr = true_expr[:, :d]
-    # 批内标准化 + MSE
-    pred_z = _batch_zscore(pred_expr)
-    true_z = _batch_zscore(true_expr)
-    mse = F.mse_loss(pred_z, true_z, reduction='mean')
+    
+    # MSE 计算方式
+    if loss_mode == 'raw':
+        # 直接在原始值上计算 MSE（优化 R²）
+        mse = F.mse_loss(pred_expr, true_expr, reduction='mean')
+    else:
+        # 批内标准化后计算 MSE（优化相关性）
+        pred_z = _batch_zscore(pred_expr)
+        true_z = _batch_zscore(true_expr)
+        mse = F.mse_loss(pred_z, true_z, reduction='mean')
+    
     # 相关损失
     corr = _corr_loss(pred_expr, true_expr)
+    
     return alpha * mse + (1.0 - alpha) * corr
 
 def total_vae_loss(x_hat, x, mu, logvar, pred_expr, y,

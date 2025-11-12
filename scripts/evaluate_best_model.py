@@ -5,6 +5,7 @@
 import os
 import sys
 from pathlib import Path
+import argparse
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import torch
@@ -23,12 +24,33 @@ import yaml
 EXPR_MEAN = 2.3276
 EXPR_STD = 2.1382
 
-def evaluate_model():
-    """Evaluate model performance on test set"""
+def evaluate_model(run_dir=None, model_name='vae_best.pt'):
+    """Evaluate model performance on test set
     
-    print("="*60)
+    Args:
+        run_dir: 运行目录路径，如 'results/20241112-1430_raw'
+        model_name: 模型文件名，默认 'vae_best.pt'
+    """
+    
+    # 确定运行目录和输出目录
+    if run_dir is None:
+        # 默认使用兼容路径
+        run_dir = Path('results')
+        model_path = run_dir / 'models' / 'vae_promoter_only_best.pt'
+        output_dir = run_dir
+    else:
+        run_dir = Path(run_dir)
+        model_path = run_dir / 'models' / model_name
+        output_dir = run_dir
+    
+    print("="*70)
     print("  VAE Model Evaluation")
-    print("="*60)
+    print("="*70)
+    print(f"Run directory: {run_dir}")
+    print(f"Model path: {model_path}")
+    print(f"Output directory: {output_dir}")
+    print("="*70)
+    print()
     
     # 1. Load configuration
     cfg = yaml.safe_load(open('config/config.yaml'))
@@ -52,9 +74,8 @@ def evaluate_model():
     )
     
     # Load best model weights
-    model_path = 'results/models/vae_promoter_only_best.pt'
-    if not Path(model_path).exists():
-        print(f"Error: Model file not found: {model_path}")
+    if not model_path.exists():
+        print(f"Error: model file not found: {model_path}")
         return
     
     state_dict = torch.load(model_path, map_location=device, weights_only=False)
@@ -81,12 +102,19 @@ def evaluate_model():
     all_mu = []
     all_logvar = []
     
+    # 用于调试：收集原始预测值（反归一化前）
+    raw_preds_for_debug = []
+    
     with torch.no_grad():
         for x, y in tqdm(test_loader, desc="Prediction"):
             x = x.to(device)
             y = y.to(device)
             
             x_hat, mu, logvar, expr_pred = model(x)
+            
+            # 保存原始预测值用于调试
+            if len(raw_preds_for_debug) < 100:  # 只保存前100个batch
+                raw_preds_for_debug.append(expr_pred.cpu().numpy())
             
             # Denormalize predictions from z-score to log2(RPKM+1)
             expr_pred = expr_pred * EXPR_STD + EXPR_MEAN
@@ -101,6 +129,16 @@ def evaluate_model():
     y_pred = np.concatenate(all_pred, axis=0).reshape(-1)
     mu = np.concatenate(all_mu, axis=0)
     logvar = np.concatenate(all_logvar, axis=0)
+    
+    # 调试输出：检查原始预测值的统计
+    if raw_preds_for_debug:
+        raw_pred_sample = np.concatenate(raw_preds_for_debug, axis=0).reshape(-1)
+        print(f"\n[DEBUG] Raw model output (before denormalization):")
+        print(f"  Mean: {raw_pred_sample.mean():.4f}")
+        print(f"  Std:  {raw_pred_sample.std():.4f}")
+        print(f"  Range: [{raw_pred_sample.min():.4f}, {raw_pred_sample.max():.4f}]")
+        print(f"  Expected if z-score: mean≈0, std≈1")
+        print(f"  Expected if log2(RPKM+1): mean≈2.3, std≈2.1\n")
     
     print(f"Predictions completed: {len(y_true)} samples")
     
@@ -142,11 +180,12 @@ def evaluate_model():
     print("\n[5/5] Saving results...")
     
     # Ensure directories exist
-    Path('results/plots').mkdir(parents=True, exist_ok=True)
+    (output_dir / 'plots').mkdir(parents=True, exist_ok=True)
     
     # Save metrics
     import json
-    with open('results/test_metrics.json', 'w') as f:
+    metrics_path = output_dir / 'test_metrics.json'
+    with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=2)
     print("Metrics saved: results/test_metrics.json")
     
@@ -155,13 +194,14 @@ def evaluate_model():
         'true_expr': y_true_valid,
         'pred_expr': y_pred_valid
     })
-    results_df.to_csv('results/test_predictions.csv', index=False)
-    print("Predictions saved: results/test_predictions.csv")
+    pred_path = output_dir / 'test_predictions.csv'
+    results_df.to_csv(pred_path, index=False)
+    print(f"Predictions saved: {pred_path}")
     
     # Save latent representations
-    np.savez('results/test_latent.npz', 
-             mu=mu, logvar=logvar)
-    print("Latent representations saved: results/test_latent.npz")
+    latent_path = output_dir / 'test_latent.npz'
+    np.savez(latent_path, mu=mu, logvar=logvar)
+    print(f"Latent representations saved: {latent_path}")
     
     # 7. Generate visualizations
     print("\nGenerating visualizations...")
@@ -217,19 +257,30 @@ def evaluate_model():
     axes[1, 1].set_ylim(0, 1)
     
     plt.tight_layout()
-    plt.savefig('results/plots/evaluation_report.png', dpi=300, bbox_inches='tight')
-    print("Visualization saved: results/plots/evaluation_report.png")
+    plot_path = output_dir / 'plots' / 'evaluation_report.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+    print(f"Visualization saved: {plot_path}")
     
-    print("\n" + "="*60)
-    print("  Evaluation Complete")
-    print("="*60)
+    print("\n" + "="*70)
+    print("  Evaluation completed")
+    print("="*70)
     print("\nGenerated files:")
-    print("  - results/test_metrics.json")
-    print("  - results/test_predictions.csv")
-    print("  - results/test_latent.npz")
-    print("  - results/plots/evaluation_report.png")
+    print(f"  - {metrics_path}")
+    print(f"  - {pred_path}")
+    print(f"  - {latent_path}")
+    print(f"  - {plot_path}")
+    print("="*70)
     print()
+    
+    return output_dir
 
 if __name__ == '__main__':
-    evaluate_model()
+    parser = argparse.ArgumentParser(description='评估 VAE 模型')
+    parser.add_argument('--run_dir', type=str, default=None,
+                       help='运行目录路径，如 results/20241112-1430_raw。默认使用 results/')
+    parser.add_argument('--model_name', type=str, default='vae_best.pt',
+                       help='模型文件名，默认 vae_best.pt')
+    args = parser.parse_args()
+    
+    evaluate_model(run_dir=args.run_dir, model_name=args.model_name)
 

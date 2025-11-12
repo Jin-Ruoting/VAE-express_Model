@@ -175,10 +175,9 @@ class RoadmapDataset(torch.utils.data.Dataset):
                 if pd.isna(y_raw):
                     continue
                 # 按需过滤低表达（默认不过滤）
+                # 注意：这里的 y_raw 是原始 RPKM 值，过滤发生在 log2 变换之前
                 if (min_expr_threshold is not None) and (y_raw <= float(min_expr_threshold)):
-                    # 如果希望过滤，改为 continue
-                    # continue
-                    pass
+                    continue  # 启用过滤：跳过低表达样本
                 enh_list = []
                 if self.use_enhancers and self.enhancers is not None:
                     sub = self.enhancers[(self.enhancers['gene_id']==gene) & (self.enhancers['eid']==eid)]
@@ -351,6 +350,10 @@ def create_dataloaders(config):
         cfg = yaml.safe_load(f)
 
     marks = cfg["marks"]["core"] + (cfg["marks"]["extra"] if cfg.get("use_extra", False) else [])
+    
+    # 从配置文件读取低表达过滤阈值
+    min_expr_threshold = cfg.get("expression", {}).get("min_threshold", 0.0)
+    
     ds = RoadmapDataset(
         data_dir=".",
         promoters_bed=cfg["paths"]["promoters_bed"],
@@ -366,7 +369,7 @@ def create_dataloaders(config):
         enhancer_bp=cfg["sequence"]["enhancer_bp"],
         top_k=cfg["sequence"]["top_k"],
         stats_json=cfg["paths"]["stats_json"],
-        min_expr_threshold=0.0,
+        min_expr_threshold=min_expr_threshold,  # 从配置文件读取
         zscore_per_eid=False,   # 关闭 zscore，返回原始 log2(RPKM+1)
         cfg=cfg                 # 传入以便读取 expression.transform
     )

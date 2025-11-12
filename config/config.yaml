@@ -17,6 +17,7 @@ eids: [E003, E004, E005, E006, E007, E016, E066, E114, E116, E118]
 expression:
   transform: log2_rpkm_plus1  # 表达值变换方式: log2_rpkm_plus1 / identity / raw
   # log2_rpkm_plus1: 应用 log2(RPKM+1) 变换
+  min_threshold: 1.0  # 过滤阈值：RPKM < 1.0 的样本将被过滤
 
 paths:
   genome_sizes: preprocessing/annotations/hg38.fa.sizes
