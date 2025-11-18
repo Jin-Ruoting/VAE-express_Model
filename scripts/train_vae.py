@@ -74,9 +74,12 @@ def main():
     cfg = yaml.safe_load(open('config/config.yaml'))
     marks = list(cfg['marks']['core']) + (cfg['marks'].get('extra', []) if cfg.get('use_extra') else [])
     in_channels = len(marks)
-    # 优先使用配置中的 promoter_bp，其次从 BED 推断
-    seq_len = cfg.get('sequence', {}).get('promoter_bp',
-              infer_seq_len_from_promoters(cfg['paths']['promoters_bed'], default_len=2000))
+    seq_cfg = cfg.get('sequence', {})
+    if seq_cfg.get('num_bins'):
+        seq_len = int(seq_cfg['num_bins'])
+    else:
+        seq_len = seq_cfg.get('promoter_bp',
+                  infer_seq_len_from_promoters(cfg['paths']['promoters_bed'], default_len=2000))
 
     # 构建 DataLoader
     train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')

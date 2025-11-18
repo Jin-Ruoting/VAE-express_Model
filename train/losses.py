@@ -64,7 +64,7 @@ def expression_prediction_loss(pred_expr, true_expr, alpha=None):
       - 'raw': MSE 在原始值上计算（关注绝对值准确性）
     """
     if alpha is None:
-        alpha = float(os.getenv('EXPR_ALPHA', '0.3'))
+        alpha = float(os.getenv('EXPR_ALPHA', '0.3'))  # 更强调相关性
     
     loss_mode = os.getenv('EXPR_LOSS_MODE', 'zscore').lower()
     

@@ -1,7 +1,9 @@
 genome: hg38
 
 sequence:
-  promoter_bp: 2000    # TSS ±1kb
+  promoter_bp: 6000    # TSS ±3kb
+  bin_size: 100        # 采样分辨率 (bp/bin)
+  num_bins: 60         # promoter_bp / bin_size
   enhancer_bp: 1000    # 增强子窗口（中心±500bp）
   top_k: 5             # Top-K增强子，先用Promoter-only时可忽略
 
@@ -22,7 +24,7 @@ expression:
 paths:
   genome_sizes: preprocessing/annotations/hg38.fa.sizes
   gtf: preprocessing/annotations/gencode.v49.primary_assembly.annotation.gtf.gz
-  promoters_bed: preprocessing/annotations/promoters_2kb.hg38.bed
+  promoters_bed: preprocessing/annotations/promoters_6kb.hg38.bed
   enhancer_map: #annotations/gene_enhancer_map_ABC.tsv   # 可为空，Promoter-only时不使用
   stats_json: preprocessing/annotations/signal_stats.json             # 信号分位数/缩放统计
   expression: exp/raw_exp.final.tsv  # 原始 RPKM 表达值文件

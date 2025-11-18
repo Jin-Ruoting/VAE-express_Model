@@ -5,7 +5,7 @@ import gzip
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument('--gtf', required=True)
-    ap.add_argument('--promoter_bp', type=int, default=2000)  # 总长度
+    ap.add_argument('--promoter_bp', type=int, default=6000)  # 总长度（默认TSS±3kb）
     ap.add_argument('--out_bed', required=True)
     return ap.parse_args()
 

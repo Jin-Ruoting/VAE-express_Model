@@ -15,7 +15,8 @@ class RoadmapDataset(torch.utils.data.Dataset):
     def __init__(self, 
                  data_dir, promoters_bed, expression_tsv, genome_sizes,
                  eids, marks_core, marks_extra=None, use_extra=True,
-                 promoter_bp=2000, use_enhancers=False, enhancer_map_tsv=None,
+                 promoter_bp=6000, bin_size=None, num_bins=None,
+                 use_enhancers=False, enhancer_map_tsv=None,
                  enhancer_bp=1000, top_k=5, stats_json=None,
                  min_expr_threshold=0.0, zscore_per_eid=False,
                  **kwargs):
@@ -23,7 +24,9 @@ class RoadmapDataset(torch.utils.data.Dataset):
         在线从 bigWig 切片，返回 X: [C, L], y: 标量(log1p或zscore后)
         """
         self.data_dir = Path(data_dir)
-        self.promoter_bp = promoter_bp
+        self.promoter_bp = int(promoter_bp)
+        self.bin_size = int(bin_size) if bin_size else None
+        self.num_bins = int(num_bins) if num_bins else None
         self.use_enhancers = use_enhancers
         self.enhancer_bp = enhancer_bp
         self.top_k = top_k
@@ -187,7 +190,17 @@ class RoadmapDataset(torch.utils.data.Dataset):
                 self.samples.append((gene, eid, chrom, p_start, p_end, strand, enh_list))
                 cnt['after_expr'] += 1
 
-        self.seq_len = promoter_bp + (len(enh_list)*enhancer_bp if self.use_enhancers and len(self.samples)>0 else 0)
+        if self.bin_size and self.num_bins:
+            target = self.bin_size * self.num_bins
+            if target != self.promoter_bp:
+                logger.warning(f"bin_size*num_bins({target}) != promoter_bp({self.promoter_bp});将按bin截断/填充。")
+        if self.bin_size and not self.num_bins and self.promoter_bp:
+            self.num_bins = self.promoter_bp // self.bin_size
+        if self.num_bins and not self.bin_size and self.promoter_bp and self.num_bins > 0:
+            self.bin_size = max(1, self.promoter_bp // self.num_bins)
+
+        seq_core = self.num_bins if (self.bin_size and self.num_bins) else self.promoter_bp
+        self.seq_len = seq_core + (len(enh_list)*enhancer_bp if self.use_enhancers and len(self.samples)>0 else 0)
         self.input_channels = len(self.marks)
         logger.info(f"Dataset built: samples={len(self.samples)}, channels={self.input_channels}, L={self.seq_len}")
         if debug:
@@ -275,6 +288,18 @@ class RoadmapDataset(torch.utils.data.Dataset):
         arr = (arr - q1) / (q99 - q1 + 1e-6)
         return arr.astype(np.float32)
 
+    def _apply_binning(self, arr):
+        if not (self.bin_size and self.num_bins):
+            return arr
+        target = self.bin_size * self.num_bins
+        if arr.size != target:
+            if arr.size > target:
+                arr = arr[:target]
+            else:
+                arr = np.pad(arr, (0, target - arr.size), mode='constant', constant_values=0.0)
+        arr = arr.reshape(self.num_bins, self.bin_size).mean(axis=1)
+        return arr.astype(np.float32)
+
     def _transform_expr(self, y):
         # y 输入为原始 RPKM/TPM
         if self.expr_scale in ('log2', 'log2_rpkm_plus1', 'log2(x+1)', 'log2_rpkm'):
@@ -297,6 +322,8 @@ class RoadmapDataset(torch.utils.data.Dataset):
             # 统一正链方向（负链则反向）
             if strand == '-':
                 v = v[::-1].copy()
+            if v.shape[0] == self.promoter_bp:
+                v = self._apply_binning(v)
             segments.append(v)
         # Enhancer段（可选）
         if self.use_enhancers and len(enh_list)>0:
@@ -363,7 +390,9 @@ def create_dataloaders(config):
         marks_core=cfg["marks"]["core"],
         marks_extra=cfg["marks"].get("extra", []),
         use_extra=cfg.get("use_extra", False),
-        promoter_bp=cfg["sequence"]["promoter_bp"],
+            promoter_bp=cfg["sequence"]["promoter_bp"],
+            bin_size=cfg["sequence"].get("bin_size"),
+            num_bins=cfg["sequence"].get("num_bins"),
         use_enhancers=False,
         enhancer_map_tsv=cfg["paths"].get("enhancer_map", None),
         enhancer_bp=cfg["sequence"]["enhancer_bp"],
