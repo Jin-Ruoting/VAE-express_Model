@@ -1,6 +1,7 @@
 import os, json
 import numpy as np
 import pyBigWig
+from collections import defaultdict
 
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
@@ -368,7 +369,75 @@ class RoadmapDataset(torch.utils.data.Dataset):
 
         return torch.from_numpy(X), torch.as_tensor(y, dtype=torch.float32)
 
-def create_dataloaders(config):
+def _kfold_split_indices(ds, num_folds, fold_idx, val_ratio=0.5, seed=42, val_split_mode='random'):
+    """
+    按 gene_id 进行 k 折划分：
+    - 前 k-1 折 -> 训练
+    - 第 k 折 -> 根据 val_split_mode 划分为验证 + 测试
+    """
+    if num_folds < 2:
+        raise ValueError("num_folds 必须 >=2 才能进行 k 折划分")
+    if not (0.0 < val_ratio < 1.0):
+        raise ValueError("val_ratio 应在 (0,1) 之间")
+    val_split_mode = (val_split_mode or 'random').lower()
+    genes = []
+    gene_to_indices = defaultdict(list)
+    gene_to_chrom = {}
+    for idx, sample in enumerate(ds.samples):
+        gene = sample[0]
+        chrom = sample[2]
+        gene_to_indices[gene].append(idx)
+        if gene not in gene_to_chrom:
+            gene_to_chrom[gene] = chrom
+    genes = list(gene_to_indices.keys())
+    rng = np.random.RandomState(seed)
+    rng.shuffle(genes)
+    folds = np.array_split(genes, num_folds)
+    fold_idx = int(fold_idx) % num_folds
+    eval_genes = set(folds[fold_idx])
+    train_genes = set(g for i, fold in enumerate(folds) if i != fold_idx for g in fold)
+
+    train_indices = [idx for g in train_genes for idx in gene_to_indices[g]]
+    if not eval_genes:
+        raise RuntimeError("k 折划分结果为空，请检查 gene_id 覆盖情况")
+
+    if val_split_mode == 'chrom':
+        chrom_to_genes = defaultdict(list)
+        for g in eval_genes:
+            chrom = gene_to_chrom.get(g, 'unknown')
+            chrom_to_genes[chrom].append(g)
+        chroms = list(chrom_to_genes.keys())
+        rng.shuffle(chroms)
+        if len(chroms) == 1:
+            val_split_mode = 'random'
+        else:
+            n_val_chrom = int(len(chroms) * val_ratio)
+            n_val_chrom = max(1, min(len(chroms) - 1, n_val_chrom))
+            val_chroms = set(chroms[:n_val_chrom])
+            val_genes = set(g for c in val_chroms for g in chrom_to_genes[c])
+            test_genes = set(g for c in chroms if c not in val_chroms for g in chrom_to_genes[c])
+            if not test_genes:
+                val_split_mode = 'random'
+    if val_split_mode != 'chrom':
+        eval_indices = [idx for g in eval_genes for idx in gene_to_indices[g]]
+        rng.shuffle(eval_indices)
+        n_val = int(len(eval_indices) * val_ratio)
+        if n_val == 0:
+            n_val = 1 if len(eval_indices) > 1 else len(eval_indices)
+        if n_val >= len(eval_indices):
+            n_val = len(eval_indices) - 1
+        val_indices = eval_indices[:n_val]
+        test_indices = eval_indices[n_val:]
+        if len(test_indices) == 0:
+            test_indices = val_indices
+    else:
+        val_indices = [idx for g in val_genes for idx in gene_to_indices[g]]
+        test_indices = [idx for g in test_genes for idx in gene_to_indices[g]]
+    return train_indices, val_indices, test_indices
+
+
+def create_dataloaders(config, num_folds=1, fold_idx=0, fold_val_ratio=0.5, fold_seed=42,
+                       fold_split_mode='random'):
     """
     使用 config/config.yaml 中的设定创建 DataLoader
     """
@@ -405,12 +474,20 @@ def create_dataloaders(config):
     N = len(ds)
     if N == 0:
         raise RuntimeError("RoadmapDataset 构建后样本数为0，请检查 gene_id 对齐、stats 键格式、以及是否误保留了重复的 _build 定义。")
-    train_ratio, val_ratio = 0.7, 0.2
-    n_train = int(N * train_ratio)
-    n_val = int(N * val_ratio)
-    n_test = N - n_train - n_val
-    g = torch.Generator().manual_seed(42)
-    train_set, val_set, test_set = torch.utils.data.random_split(ds, [n_train, n_val, n_test], generator=g)
+
+    if num_folds and num_folds > 1:
+        train_idx, val_idx, test_idx = _kfold_split_indices(
+            ds, num_folds, fold_idx, fold_val_ratio, fold_seed, fold_split_mode)
+        train_set = torch.utils.data.Subset(ds, train_idx)
+        val_set = torch.utils.data.Subset(ds, val_idx)
+        test_set = torch.utils.data.Subset(ds, test_idx)
+    else:
+        train_ratio, val_ratio = 0.7, 0.2
+        n_train = int(N * train_ratio)
+        n_val = int(N * val_ratio)
+        n_test = N - n_train - n_val
+        g = torch.Generator().manual_seed(42)
+        train_set, val_set, test_set = torch.utils.data.random_split(ds, [n_train, n_val, n_test], generator=g)
 
     num_workers = int(os.getenv('NUM_WORKERS', '0'))
     pin_mem = torch.cuda.is_available()

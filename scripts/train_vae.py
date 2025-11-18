@@ -4,6 +4,7 @@ VAE模型训练脚本
 """
 import os
 import sys
+import argparse
 from pathlib import Path
 from datetime import datetime
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -55,7 +56,25 @@ def infer_seq_len_from_promoters(prom_path: str, default_len: int = 2000) -> int
     except Exception:
         return default_len
 
+def parse_args():
+    ap = argparse.ArgumentParser(description="Train VAE with optional k-fold cross-validation.")
+    ap.add_argument("--config", default="config/config.yaml", help="Path to config YAML.")
+    ap.add_argument("--num-folds", type=int, default=int(os.getenv("NUM_FOLDS", "1")),
+                    help="Number of folds for k-fold CV (<=1 disables).")
+    ap.add_argument("--fold-idx", type=int, default=int(os.getenv("FOLD_IDX", "0")),
+                    help="Fold index (0-based).")
+    ap.add_argument("--fold-val-ratio", type=float, default=float(os.getenv("FOLD_VAL_RATIO", "0.5")),
+                    help="Within held-out fold, fraction used for validation (rest for test).")
+    ap.add_argument("--fold-seed", type=int, default=int(os.getenv("FOLD_SEED", "42")),
+                    help="Random seed for k-fold shuffling.")
+    ap.add_argument("--fold-split-mode", default=os.getenv("FOLD_SPLIT_MODE", "random"),
+                    choices=["random", "chrom"],
+                    help="How to split held-out fold into val/test: random or chrom.")
+    return ap.parse_args()
+
+
 def main():
+    args = parse_args()
     # 获取本次运行的目录
     run_dir = get_run_dir()
     ensure_dirs(run_dir)
@@ -71,7 +90,7 @@ def main():
     print("="*70)
     print()
 
-    cfg = yaml.safe_load(open('config/config.yaml'))
+    cfg = yaml.safe_load(open(args.config))
     marks = list(cfg['marks']['core']) + (cfg['marks'].get('extra', []) if cfg.get('use_extra') else [])
     in_channels = len(marks)
     seq_cfg = cfg.get('sequence', {})
@@ -81,8 +100,18 @@ def main():
         seq_len = seq_cfg.get('promoter_bp',
                   infer_seq_len_from_promoters(cfg['paths']['promoters_bed'], default_len=2000))
 
+    if args.num_folds and args.num_folds > 1:
+        print(f"[CV] Using fold {args.fold_idx}/{args.num_folds-1}, "
+              f"val_ratio={args.fold_val_ratio}, split={args.fold_split_mode}")
     # 构建 DataLoader
-    train_loader, val_loader, test_loader = create_dataloaders('config/config.yaml')
+    train_loader, val_loader, test_loader = create_dataloaders(
+        args.config,
+        num_folds=args.num_folds,
+        fold_idx=args.fold_idx,
+        fold_val_ratio=args.fold_val_ratio,
+        fold_seed=args.fold_seed,
+        fold_split_mode=args.fold_split_mode,
+    )
 
     # 不从 DataLoader 提前取 batch
     n_train = len(getattr(train_loader, 'dataset', []))
